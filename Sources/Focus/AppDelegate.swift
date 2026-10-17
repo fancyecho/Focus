@@ -28,6 +28,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey.onRelease = { [weak self] in self?.hotKeyReleased() }
         self.hotKey = hotKey
 
+        let updater = Updater.shared
+        updater.onStateChange = { [weak self] in
+            guard let self else { return }
+            self.statusItem.button?.image = updater.hasUpdate ? StatusIcon.badgedImage : StatusIcon.image
+            DispatchQueue.main.async { self.menuPanel.relayout() }
+        }
+        updater.start()
+
         idleTimer = Timer.scheduledTimer(timeInterval: 5, target: self,
                                          selector: #selector(checkIdle), userInfo: nil, repeats: true)
 

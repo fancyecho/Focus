@@ -84,6 +84,19 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         installMonitors()
     }
 
+    /// 内容高度变了（比如出现更新提示），保持顶边不动重新排一下
+    func relayout() {
+        guard isShown else { return }
+        let size = hosting.fittingSize
+        guard size != panel.frame.size else { return }
+        var frame = panel.frame
+        frame.origin.y = frame.maxY - size.height
+        frame.size = size
+        panel.setFrame(frame, display: true, animate: true)
+        panel.contentView?.subviews.first?.frame = NSRect(origin: .zero, size: size)
+        panel.invalidateShadow()
+    }
+
     func close() {
         guard panel.isVisible, !isClosing else { return }
         isClosing = true

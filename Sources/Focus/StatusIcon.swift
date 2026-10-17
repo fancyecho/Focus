@@ -3,7 +3,11 @@ import AppKit
 /// 菜单栏图标：一盏青灯。细长的灯焰（焰尖向右轻挑）+ 实心焰心 + 一弯灯盏。
 /// 画成模板图，菜单栏深浅色会自动适配。
 enum StatusIcon {
-    static let image: NSImage = {
+    static let image = make(badge: false)
+    /// 右上角带小圆点：有新版本可以更新
+    static let badgedImage = make(badge: true)
+
+    private static func make(badge: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
             ctx.setFillColor(NSColor.black.cgColor)
@@ -19,12 +23,21 @@ enum StatusIcon {
 
             ctx.addPath(dish())
             ctx.fillPath()
+
+            if badge {
+                // 先挖出一圈空隙，再画圆点，和火焰分开
+                let dot = CGRect(x: 13.4, y: 12.8, width: 4.4, height: 4.4)
+                ctx.setBlendMode(.clear)
+                ctx.fillEllipse(in: dot.insetBy(dx: -1.2, dy: -1.2))
+                ctx.setBlendMode(.normal)
+                ctx.fillEllipse(in: dot)
+            }
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "Focus"
+        image.accessibilityDescription = badge ? "Focus（有新版本）" : "Focus"
         return image
-    }()
+    }
 
     private static let cx: CGFloat = 9
 

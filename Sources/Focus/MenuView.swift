@@ -3,6 +3,7 @@ import SwiftUI
 /// 点菜单栏图标弹出的面板
 struct MenuView: View {
     let store: FocusStore
+    let updater = Updater.shared
     let onStart: () -> Void
     let onQuit: () -> Void
 
@@ -12,6 +13,12 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
                 .padding(.bottom, 18)
+
+            if updater.hasUpdate || isUpdateFailure {
+                UpdateBanner(updater: updater)
+                    .padding(.bottom, 16)
+                    .transition(.blurReplace)
+            }
 
             stats
                 .padding(.bottom, 16)
@@ -87,10 +94,17 @@ struct MenuView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                Button(action: { updater.check(userInitiated: true) }) {
+                    Text(footerText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .contentTransition(.interpolate)
+                }
+                .buttonStyle(.plain)
+                .disabled(updater.state == .checking)
+                .help("检查更新")
             }
+            .animation(.smooth, value: updater.state)
         }
         .font(.system(size: 13))
         .padding(20)
@@ -109,6 +123,19 @@ struct MenuView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+        }
+    }
+
+    private var isUpdateFailure: Bool {
+        if case .failed = updater.state { true } else { false }
+    }
+
+    private var footerText: String {
+        let version = "v\(updater.currentVersion)"
+        switch updater.state {
+        case .checking: return "\(version) · 检查中…"
+        case .upToDate: return "\(version) · 已是最新"
+        default: return "\(version) · 检查更新"
         }
     }
 
@@ -184,12 +211,81 @@ enum Brand {
     static let glow = Color(red: 1.0, green: 0.55, blue: 0.24)
 }
 
+/// 有新版本时卡片顶部的提示条
+private struct UpdateBanner: View {
+    let updater: Updater
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 20))
+                .foregroundStyle(Brand.gradient)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 12, weight: .semibold))
+                if case .downloading(_, let progress) = updater.state {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .tint(Brand.glow)
+                        .controlSize(.mini)
+                } else {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 4)
+            switch updater.state {
+            case .available:
+                Button("更新") { updater.install() }
+                    .buttonStyle(BrandButtonStyle(compact: true))
+            case .installing:
+                ProgressView().controlSize(.small)
+            case .failed:
+                Button("重试") { updater.retry() }
+                    .buttonStyle(BrandButtonStyle(compact: true))
+            default:
+                EmptyView()
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var icon: String {
+        if case .failed = updater.state { return "exclamationmark.circle.fill" }
+        return "arrow.down.circle.fill"
+    }
+
+    private var title: String {
+        switch updater.state {
+        case .available(let version): "新版本 \(version) 可用"
+        case .downloading(let version, _): "正在下载 \(version)…"
+        case .installing(let version): "正在安装 \(version)…"
+        case .failed: "更新没有完成"
+        default: ""
+        }
+    }
+
+    private var subtitle: String {
+        switch updater.state {
+        case .available: "当前 \(updater.currentVersion)，点更新会自动安装并重启"
+        case .installing: "装好后会自动重启"
+        case .failed(let message): message
+        default: ""
+        }
+    }
+}
+
 private struct BrandButtonStyle: ButtonStyle {
+    var compact = false
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .font(compact ? .system(size: 12, weight: .semibold) : nil)
             .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
+            .padding(.horizontal, compact ? 12 : 16)
+            .padding(.vertical, compact ? 5 : 11)
             .background(Brand.gradient, in: .capsule)
             .overlay(Capsule().strokeBorder(.white.opacity(0.18)))
             .shadow(color: Brand.glow.opacity(0.35), radius: 10, y: 4)
