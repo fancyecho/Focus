@@ -47,6 +47,20 @@ struct MenuView: View {
             .padding(.bottom, 8)
 
             HStack {
+                Text("专注画面保持亮屏")
+                Spacer()
+                Picker("", selection: $store.keepAwakeMinutes) {
+                    ForEach(FocusStore.keepAwakeOptions, id: \.self) { minutes in
+                        Text(Self.keepAwakeLabel(minutes)).tag(minutes)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            .help("没人碰电脑时最多保持亮屏多久，之后按系统设置熄屏、睡眠")
+            .padding(.bottom, 8)
+
+            HStack {
                 Text("音效")
                 Spacer()
                 Toggle("", isOn: $store.soundEnabled)
@@ -95,6 +109,15 @@ struct MenuView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+        }
+    }
+
+    private static func keepAwakeLabel(_ minutes: Int) -> String {
+        switch minutes {
+        case 0: "跟随系统"
+        case let m where m % 60 == 0: "\(m / 60) 小时"
+        case let m where m > 60: "\(Double(m) / 60) 小时"
+        default: "\(minutes) 分钟"
         }
     }
 

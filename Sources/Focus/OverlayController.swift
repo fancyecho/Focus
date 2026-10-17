@@ -21,8 +21,8 @@ final class OverlayController: NSObject {
     private static let quoteInterval: TimeInterval = 15 * 60
     /// 长按到底 / 打完整句时，模糊最多揭开到这个程度
     private static let revealedBlur: CGFloat = 0.4
-    /// 显示期间保持屏幕常亮，最多这么久，防止整夜不睡
-    private static let keepAwakeLimit: TimeInterval = 3 * 3600
+    /// 睡眠（合盖、熄屏）超过这么久，醒来就算新的一段专注
+    private static let newSessionAfterSleep: TimeInterval = 30 * 60
 
     private let store = FocusStore.shared
     private let sound = SoundPlayer.shared
@@ -33,6 +33,7 @@ final class OverlayController: NSObject {
     private var eventMonitor: Any?
     private var sleepAssertion: IOPMAssertionID = 0
     private var keepAwakeTimer: Timer?
+    private var pausedAt: Date?
     private var lastActivity = Date()
     private var lastQuoteChange = Date()
     private var lastMatched = 0
@@ -46,10 +47,15 @@ final class OverlayController: NSObject {
             self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
         let workspace = NSWorkspace.shared.notificationCenter
-        workspace.addObserver(self, selector: #selector(screensDidSleep),
+        // 熄屏和系统睡眠（包括合盖）都要暂停计时，醒来再接着算
+        workspace.addObserver(self, selector: #selector(pauseCounting),
                               name: NSWorkspace.screensDidSleepNotification, object: nil)
-        workspace.addObserver(self, selector: #selector(screensDidWake),
+        workspace.addObserver(self, selector: #selector(pauseCounting),
+                              name: NSWorkspace.willSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(resumeCounting),
                               name: NSWorkspace.screensDidWakeNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(resumeCounting),
+                              name: NSWorkspace.didWakeNotification, object: nil)
     }
 
     /// - Parameters:
@@ -62,6 +68,7 @@ final class OverlayController: NSObject {
         lastActivity = Date()
         lastQuoteChange = Date()
         lastMatched = 0
+        pausedAt = nil
 
         model = OverlayModel()
         model.segmentStart = start
@@ -180,6 +187,7 @@ final class OverlayController: NSObject {
 
     func noteActivity() {
         lastActivity = Date()
+        if isShowing, !isExiting { extendKeepAwake() }
         guard model.ambient else { return }
         withAnimation(.smooth(duration: 0.7)) { model.ambient = false }
     }
@@ -313,18 +321,32 @@ final class OverlayController: NSObject {
 
     // MARK: 睡眠
 
-    /// 屏幕睡着后就不再计时，醒来接着算
-    @objc private func screensDidSleep() {
-        guard isShowing, !isExiting, let start = model.segmentStart else { return }
+    /// 熄屏或系统睡眠（包括合盖）就暂停计时
+    @objc private func pauseCounting() {
+        guard isShowing, !isExiting else { return }
+        keepScreenAwake(false)
+        guard let start = model.segmentStart else { return }
         model.accumulated += Date().timeIntervalSince(start)
         model.segmentStart = nil
+        pausedAt = Date()
     }
 
-    @objc private func screensDidWake() {
+    /// 醒来接着算。睡得太久（比如合盖过夜）就先把之前的记下来，重新开始一段，
+    /// 免得醒来看到“专注了 9 小时”
+    @objc private func resumeCounting() {
         guard isShowing, !isExiting, model.segmentStart == nil else { return }
+        if let pausedAt, Date().timeIntervalSince(pausedAt) >= Self.newSessionAfterSleep {
+            store.record(model.accumulated)
+            model.accumulated = 0
+        }
+        pausedAt = nil
         model.segmentStart = Date()
+        lastActivity = Date()
+        keepScreenAwake(true)
     }
 
+    /// 有人在看就保持亮屏：从最后一次碰电脑算起，超过设定时长没人碰，
+    /// 就交还给系统，按系统设置正常熄屏、睡眠。电量低于 20% 时不强制亮屏。
     private func keepScreenAwake(_ awake: Bool) {
         keepAwakeTimer?.invalidate()
         keepAwakeTimer = nil
@@ -332,12 +354,22 @@ final class OverlayController: NSObject {
             IOPMAssertionRelease(sleepAssertion)
             sleepAssertion = 0
         }
-        guard awake else { return }
+        let limit = TimeInterval(store.keepAwakeMinutes * 60)
+        guard awake, limit > 0, !Battery.isLow else { return }
         IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleDisplaySleep as CFString,
                                     IOPMAssertionLevel(kIOPMAssertionLevelOn),
                                     "Focus 正在显示专注画面" as CFString, &sleepAssertion)
-        keepAwakeTimer = Timer.scheduledTimer(withTimeInterval: Self.keepAwakeLimit, repeats: false) { [weak self] _ in
+        keepAwakeTimer = Timer.scheduledTimer(withTimeInterval: limit, repeats: false) { [weak self] _ in
             self?.keepScreenAwake(false)
+        }
+    }
+
+    /// 碰了电脑：常亮时长从现在重新算（已经放手的话重新接管）
+    private func extendKeepAwake() {
+        if let keepAwakeTimer, sleepAssertion != 0 {
+            keepAwakeTimer.fireDate = Date().addingTimeInterval(TimeInterval(store.keepAwakeMinutes * 60))
+        } else {
+            keepScreenAwake(true)
         }
     }
 

@@ -7,14 +7,21 @@ import ServiceManagement
 final class FocusStore {
     static let shared = FocusStore()
     static let idleOptions = [0, 1, 2, 3, 5, 10, 15, 30] // 分钟，0 = 关闭
+    static let keepAwakeOptions = [0, 30, 60, 90, 120] // 分钟，0 = 跟随系统
 
     private static let idleMinutesKey = "idleMinutes"
     private static let soundEnabledKey = "soundEnabled"
+    private static let keepAwakeMinutesKey = "keepAwakeMinutes"
     private static let dailyKey = "dailyFocusSeconds"
     private static let minCountedSeconds: TimeInterval = 60
 
     var idleMinutes: Int {
         didSet { UserDefaults.standard.set(idleMinutes, forKey: Self.idleMinutesKey) }
+    }
+
+    /// 专注画面显示时，没人碰电脑最多保持亮屏多久
+    var keepAwakeMinutes: Int {
+        didSet { UserDefaults.standard.set(keepAwakeMinutes, forKey: Self.keepAwakeMinutesKey) }
     }
 
     var soundEnabled: Bool {
@@ -31,6 +38,7 @@ final class FocusStore {
         let defaults = UserDefaults.standard
         idleMinutes = defaults.object(forKey: Self.idleMinutesKey) as? Int ?? 5
         soundEnabled = defaults.object(forKey: Self.soundEnabledKey) as? Bool ?? true
+        keepAwakeMinutes = defaults.object(forKey: Self.keepAwakeMinutesKey) as? Int ?? 90
         daily = defaults.dictionary(forKey: Self.dailyKey) as? [String: Double] ?? [:]
     }
 

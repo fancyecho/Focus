@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.ps
 import IOKit.pwr_mgt
 
 /// 判断有没有别的 App 正在阻止屏幕休眠。浏览器和播放器播视频、视频会议时都会这样做，
@@ -28,5 +29,21 @@ enum MediaActivity {
             }
         }
         return nil
+    }
+}
+
+enum Battery {
+    /// 正在用电池且电量低于 20%
+    static var isLow: Bool {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return false }
+        for source in sources {
+            guard let description = IOPSGetPowerSourceDescription(info, source)?.takeUnretainedValue() as? [String: Any],
+                  description[kIOPSPowerSourceStateKey] as? String == kIOPSBatteryPowerValue,
+                  let current = description[kIOPSCurrentCapacityKey] as? Int,
+                  let max = description[kIOPSMaxCapacityKey] as? Int, max > 0 else { continue }
+            if Double(current) / Double(max) < 0.2 { return true }
+        }
+        return false
     }
 }
