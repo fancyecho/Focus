@@ -62,6 +62,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func checkIdle() {
         guard store.idleMinutes > 0, !overlay.isShowing else { return }
+        // 看网课、开会时很久不碰键鼠是正常的，不打断
+        let blocker = MediaActivity.appKeepingDisplayAwake()
+        if store.autoPausedBy != blocker { store.autoPausedBy = blocker }
+        guard blocker == nil else { return }
+
         let anyInput = CGEventType(rawValue: ~0)!
         let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
         if idle >= TimeInterval(store.idleMinutes * 60) {

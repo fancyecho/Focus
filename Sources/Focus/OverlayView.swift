@@ -439,12 +439,14 @@ private struct HoldPill: View {
 private struct Reveal: ViewModifier {
     let shown: Bool
     let delay: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
+        // 开了“减弱动态效果”就只淡入淡出，不位移、不变模糊
         content
             .opacity(shown ? 1 : 0)
-            .blur(radius: shown ? 0 : 14)
-            .offset(y: shown ? 0 : 16)
+            .blur(radius: shown || reduceMotion ? 0 : 14)
+            .offset(y: shown || reduceMotion ? 0 : 16)
             .animation(shown ? .smooth(duration: 1.1).delay(delay) : .easeIn(duration: 0.35), value: shown)
     }
 }

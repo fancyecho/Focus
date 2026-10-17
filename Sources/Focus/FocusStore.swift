@@ -21,6 +21,9 @@ final class FocusStore {
         didSet { UserDefaults.standard.set(soundEnabled, forKey: Self.soundEnabledKey) }
     }
 
+    /// 有 App 在播放视频或开会时暂停自动模糊，这里记着是哪个 App（nil = 没暂停）
+    var autoPausedBy: String?
+
     /// "yyyy-MM-dd" -> 当天专注秒数
     private(set) var daily: [String: Double]
 

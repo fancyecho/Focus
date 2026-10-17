@@ -10,6 +10,7 @@ private final class FloatingPanel: NSPanel {
 final class MenuPanelController: NSObject, NSWindowDelegate {
     private static let gap: CGFloat = 6
     private static let screenMargin: CGFloat = 8
+    private static let cornerRadius: CGFloat = 22
 
     private let panel: FloatingPanel
     private let hosting: NSHostingView<AnyView>
@@ -34,10 +35,20 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.delegate = self
 
+        // 外面再包一层圆角遮罩：透明窗口的阴影按内容的形状计算，
+        // 不裁成圆角的话，四角会露出方形的阴影边
         let glass = NSGlassEffectView()
-        glass.cornerRadius = 22
+        glass.cornerRadius = Self.cornerRadius
         glass.contentView = hosting
-        panel.contentView = glass
+        glass.autoresizingMask = [.width, .height]
+
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.cornerRadius = Self.cornerRadius
+        container.layer?.cornerCurve = .continuous
+        container.layer?.masksToBounds = true
+        container.addSubview(glass)
+        panel.contentView = container
     }
 
     func toggle(below button: NSStatusBarButton) {
@@ -57,15 +68,19 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
 
         isClosing = false
         panel.setFrame(frame.offsetBy(dx: 0, dy: 8), display: true)
+        panel.contentView?.subviews.first?.frame = NSRect(origin: .zero, size: size)
         panel.alphaValue = 0
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
-        NSAnimationContext.runAnimationGroup { ctx in
+        panel.invalidateShadow()
+        NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.22
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
             panel.animator().alphaValue = 1
             panel.animator().setFrame(frame, display: true)
-        }
+        }, completionHandler: {
+            self.panel.invalidateShadow() // 内容画好后按圆角重新算一次阴影
+        })
         installMonitors()
     }
 

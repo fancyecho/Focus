@@ -68,9 +68,15 @@ struct MenuView: View {
 
             Divider().padding(.bottom, 8)
 
-            Button("退出 Focus", action: onQuit)
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+            HStack {
+                Button("退出 Focus", action: onQuit)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .font(.system(size: 13))
         .padding(20)
@@ -84,11 +90,18 @@ struct MenuView: View {
                 .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Focus").font(.system(size: 15, weight: .bold))
-                Text(store.idleMinutes > 0 ? "离开 \(store.idleMinutes) 分钟后自动模糊" : "自动模糊已关闭")
+                Text(statusLine)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
+    }
+
+    private var statusLine: String {
+        if store.idleMinutes == 0 { return "自动模糊已关闭" }
+        if let app = store.autoPausedBy { return "\(app) 正在播放，暂不自动模糊" }
+        return "离开 \(store.idleMinutes) 分钟后自动模糊"
     }
 
     private var stats: some View {
