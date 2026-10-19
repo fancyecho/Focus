@@ -19,7 +19,11 @@ if [ ! -d Resources/Sounds ]; then
     swift -O scripts/make-sounds.swift Resources/Sounds
 fi
 
-swift build -c release
+# 直接用 swiftc 编译：只有一个模块、没有依赖，不需要 SwiftPM。
+# （SwiftPM 会扫描所有已装的 SDK，遇到残缺的 SDK 会直接报错，这样更稳）
+mkdir -p .build/release
+swiftc -O -swift-version 5 -target arm64-apple-macos26.0 -sdk "$(xcrun --show-sdk-path)" \
+    -module-name Focus Sources/Focus/*.swift -o .build/release/Focus
 
 APP=build/Focus.app
 rm -rf "$APP"

@@ -23,6 +23,8 @@ final class OverlayController: NSObject {
     private static let revealedBlur: CGFloat = 0.4
     /// 睡眠（合盖、熄屏）超过这么久，醒来就算新的一段专注
     private static let newSessionAfterSleep: TimeInterval = 30 * 60
+    /// 每秒一次的计时器两次之间隔了这么久，说明电脑中途睡过
+    static let sleepGap: TimeInterval = 30
 
     private let store = FocusStore.shared
     private let sound = SoundPlayer.shared
@@ -34,6 +36,7 @@ final class OverlayController: NSObject {
     private var sleepAssertion: IOPMAssertionID = 0
     private var keepAwakeTimer: Timer?
     private var pausedAt: Date?
+    private var lastTick = Date()
     private var lastActivity = Date()
     private var lastQuoteChange = Date()
     private var lastMatched = 0
@@ -69,6 +72,7 @@ final class OverlayController: NSObject {
         lastQuoteChange = Date()
         lastMatched = 0
         pausedAt = nil
+        lastTick = Date()
 
         model = OverlayModel()
         model.segmentStart = start
@@ -194,7 +198,20 @@ final class OverlayController: NSObject {
 
     @objc private func tick() {
         guard isShowing, !isExiting else { return }
-        let idle = Date().timeIntervalSince(lastActivity)
+
+        // 不只靠系统的睡眠通知：合盖后 Mac 会周期性“半醒”（DarkWake），这时不会发通知。
+        // 计时器在睡眠中不走，所以两次之间隔得太久，就说明中途睡过，那段不算
+        let now = Date()
+        let gap = now.timeIntervalSince(lastTick)
+        lastTick = now
+        if gap > Self.sleepGap { pause(at: now.addingTimeInterval(-gap)) }
+        if Displays.areAsleep {
+            pause(at: now)
+            return
+        }
+        if model.segmentStart == nil { resumeCounting() }
+
+        let idle = now.timeIntervalSince(lastActivity)
 
         if !model.ambient, !model.holding, idle >= Self.ambientDelay {
             // 打到一半就离开了：清掉没打完的字，模糊恢复完整
@@ -323,18 +340,24 @@ final class OverlayController: NSObject {
 
     /// 熄屏或系统睡眠（包括合盖）就暂停计时
     @objc private func pauseCounting() {
+        pause(at: Date())
+    }
+
+    /// 计时算到 date 为止（睡眠是事后才发现的，所以可以往回截）
+    private func pause(at date: Date) {
         guard isShowing, !isExiting else { return }
         keepScreenAwake(false)
         guard let start = model.segmentStart else { return }
-        model.accumulated += Date().timeIntervalSince(start)
+        model.accumulated += max(0, date.timeIntervalSince(start))
         model.segmentStart = nil
-        pausedAt = Date()
+        pausedAt = date
     }
 
     /// 醒来接着算。睡得太久（比如合盖过夜）就先把之前的记下来，重新开始一段，
     /// 免得醒来看到“专注了 9 小时”
     @objc private func resumeCounting() {
-        guard isShowing, !isExiting, model.segmentStart == nil else { return }
+        guard isShowing, !isExiting, model.segmentStart == nil, !Displays.areAsleep else { return }
+        lastTick = Date()
         if let pausedAt, Date().timeIntervalSince(pausedAt) >= Self.newSessionAfterSleep {
             store.record(model.accumulated)
             model.accumulated = 0

@@ -47,3 +47,8 @@ enum Battery {
         return false
     }
 }
+
+enum Displays {
+    /// 主屏幕是不是黑着（熄屏、合盖，或合盖后的“半醒”）
+    static var areAsleep: Bool { CGDisplayIsAsleep(CGMainDisplayID()) != 0 }
+}

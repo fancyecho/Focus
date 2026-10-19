@@ -10,6 +10,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: HotKey?
     private var hotKeyDown = false
     private var idleTimer: Timer?
+    private var lastIdleCheck = Date()
+    /// 启动或最近一次醒来的时刻，离开时长不往这之前算
+    private var lastWake = Date()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -69,17 +72,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: 离开检测
 
     @objc private func checkIdle() {
-        guard store.idleMinutes > 0, !overlay.isShowing else { return }
+        // 合盖后 Mac 会周期性“半醒”，屏幕不亮，也不会发系统通知；
+        // 这时不能检测离开，否则会在黑屏里开始专注，并把合盖前的时间都算进去
+        let now = Date()
+        if now.timeIntervalSince(lastIdleCheck) > OverlayController.sleepGap { lastWake = now }
+        lastIdleCheck = now
+        if Displays.areAsleep { lastWake = now }
+
+        guard store.idleMinutes > 0, !overlay.isShowing, now > lastWake else { return }
         // 看网课、开会时很久不碰键鼠是正常的，不打断
         let blocker = MediaActivity.appKeepingDisplayAwake()
         if store.autoPausedBy != blocker { store.autoPausedBy = blocker }
         guard blocker == nil else { return }
 
         let anyInput = CGEventType(rawValue: ~0)!
-        let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
-        if idle >= TimeInterval(store.idleMinutes * 60) {
-            // 离开的这段时间也算专注（你在书桌前做题）
-            overlay.show(since: Date().addingTimeInterval(-idle), playSound: false)
+        let threshold = TimeInterval(store.idleMinutes * 60)
+        let idle = min(CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput),
+                       now.timeIntervalSince(lastWake))
+        if idle >= threshold {
+            // 离开的这段时间也算专注（你在书桌前做题），但最多往回算一个离开时长
+            overlay.show(since: now.addingTimeInterval(-min(idle, threshold + 10)), playSound: false)
         }
     }
 
