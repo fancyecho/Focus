@@ -304,17 +304,18 @@ private enum Grain {
 
 // MARK: - 解锁控件
 
+/// 展开输入框时，长按胶囊的玻璃融进输入框里，而不是单独淡出
 private struct UnlockControls: View {
     @Bindable var model: OverlayModel
+    @Namespace private var glass
 
     var body: some View {
         GlassEffectContainer(spacing: 12) {
             HStack(spacing: 12) {
                 if !model.typingRevealed {
-                    HoldPill(holding: model.holding, progress: model.holdProgress)
-                        .transition(.blurReplace)
+                    HoldPill(holding: model.holding, progress: model.holdProgress, glass: glass)
                 }
-                TypingCapsule(model: model)
+                TypingCapsule(model: model, glass: glass)
             }
         }
         .animation(.smooth(duration: 0.55), value: model.typingRevealed)
@@ -325,7 +326,9 @@ private struct UnlockControls: View {
 /// 那句话作为淡色底字放在框里，打的字正好盖在底字上，不再单独显示一遍。
 private struct TypingCapsule: View {
     @Bindable var model: OverlayModel
+    let glass: Namespace.ID
     @FocusState private var focused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let font = Font.system(size: 20, weight: .medium)
     private static let phrase = Array(OverlayController.unlockPhrase)
@@ -375,11 +378,14 @@ private struct TypingCapsule: View {
             focused = true
         }
         .glassEffect(.regular.interactive(), in: .capsule)
-        .modifier(Shake(attempts: CGFloat(model.wrongAttempts)))
+        .glassEffectID("typing", in: glass)
+        // 开了“减弱动态效果”就不左右晃，只靠提示音
+        .modifier(Shake(attempts: reduceMotion ? 0 : CGFloat(model.wrongAttempts)))
         .animation(.default, value: model.wrongAttempts)
         .animation(.smooth(duration: 0.55), value: revealed)
-        .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { focused = true }
+        .task {
+            try? await Task.sleep(for: .milliseconds(200))
+            focused = true
         }
     }
 
@@ -404,6 +410,7 @@ private struct TypingCapsule: View {
 private struct HoldPill: View {
     let holding: Bool
     let progress: Double
+    let glass: Namespace.ID
 
     var body: some View {
         HStack(spacing: 8) {
@@ -430,6 +437,7 @@ private struct HoldPill: View {
         }
         .clipShape(Capsule())
         .glassEffect(.regular, in: .capsule)
+        .glassEffectID("hold", in: glass)
         .animation(.smooth(duration: 0.3), value: holding)
     }
 }

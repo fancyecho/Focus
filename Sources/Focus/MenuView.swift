@@ -29,9 +29,11 @@ struct MenuView: View {
             Button(action: onStart) {
                 HStack {
                     Image(nsImage: StatusIcon.image).renderingMode(.template)
+                        .accessibilityHidden(true)
                     Text("开始专注")
                     Spacer()
                     Text("⌥⌘F").opacity(0.7)
+                        .accessibilityLabel("快捷键 Option Command F")
                 }
                 .font(.system(size: 14, weight: .semibold))
             }
@@ -43,7 +45,7 @@ struct MenuView: View {
             HStack {
                 Text("离开后自动模糊")
                 Spacer()
-                Picker("", selection: $store.idleMinutes) {
+                Picker("离开后自动模糊", selection: $store.idleMinutes) {
                     ForEach(FocusStore.idleOptions, id: \.self) { minutes in
                         Text(minutes == 0 ? "关闭" : "\(minutes) 分钟").tag(minutes)
                     }
@@ -56,7 +58,7 @@ struct MenuView: View {
             HStack {
                 Text("专注画面保持亮屏")
                 Spacer()
-                Picker("", selection: $store.keepAwakeMinutes) {
+                Picker("专注画面保持亮屏", selection: $store.keepAwakeMinutes) {
                     ForEach(FocusStore.keepAwakeOptions, id: \.self) { minutes in
                         Text(Self.keepAwakeLabel(minutes)).tag(minutes)
                     }
@@ -70,7 +72,7 @@ struct MenuView: View {
             HStack {
                 Text("音效")
                 Spacer()
-                Toggle("", isOn: $store.soundEnabled)
+                Toggle("音效", isOn: $store.soundEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
@@ -80,7 +82,7 @@ struct MenuView: View {
             HStack {
                 Text("登录时启动")
                 Spacer()
-                Toggle("", isOn: $store.launchAtLogin)
+                Toggle("登录时启动", isOn: $store.launchAtLogin)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
@@ -97,7 +99,7 @@ struct MenuView: View {
                 Button(action: { updater.check(userInitiated: true) }) {
                     Text(footerText)
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .contentTransition(.interpolate)
                 }
                 .buttonStyle(.plain)
@@ -116,6 +118,7 @@ struct MenuView: View {
             Image(nsImage: NSApp.applicationIconImage)
                 .resizable()
                 .frame(width: 30, height: 30)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Focus").font(.system(size: 15, weight: .bold))
                 Text(statusLine)
@@ -162,6 +165,7 @@ struct MenuView: View {
                     .foregroundStyle(.secondary)
                 Text(store.todaySeconds < 60 ? "还没开始" : DurationText.long(store.todaySeconds))
                     .font(.system(size: 26, weight: .bold, design: .rounded))
+                    .monospacedDigit()
                     .contentTransition(.numericText())
             }
             Spacer()
@@ -194,8 +198,14 @@ private struct WeekChart: View {
                 }
                 .frame(maxWidth: .infinity)
                 .help(DurationText.long(day.seconds))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(isToday ? "今天" : "星期" + Self.weekdayName(day.date))
+                .accessibilityValue(day.seconds < 60 ? "没有专注" : DurationText.long(day.seconds))
             }
         }
+        .animation(.smooth(duration: 0.6), value: days.map(\.seconds))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("最近 7 天专注")
     }
 
     private static func weekdayName(_ date: Date) -> String {
@@ -287,7 +297,7 @@ private struct BrandButtonStyle: ButtonStyle {
             .padding(.horizontal, compact ? 12 : 16)
             .padding(.vertical, compact ? 5 : 11)
             .background(Brand.gradient, in: .capsule)
-            .overlay(Capsule().strokeBorder(.white.opacity(0.18)))
+            .overlay { Capsule().strokeBorder(.white.opacity(0.18)) }
             .shadow(color: Brand.glow.opacity(0.35), radius: 10, y: 4)
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .brightness(configuration.isPressed ? -0.05 : 0)
