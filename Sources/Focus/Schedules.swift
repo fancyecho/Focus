@@ -240,6 +240,11 @@ final class ScheduleStore {
         UserDefaults.standard.set(passCounts, forKey: Self.passCountsKey)
     }
 
+    /// 提前结束临时放行
+    func revokePass(for bundleID: String) {
+        passes[bundleID] = nil
+    }
+
     func dropExpiredPasses(at now: Date = Date()) {
         let live = passes.filter { $0.value > now }
         if live.count != passes.count { passes = live }

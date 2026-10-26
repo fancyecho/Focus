@@ -6,6 +6,8 @@ import SwiftUI
 final class AppBlocker: NSObject {
     private let store = ScheduleStore.shared
     private let shield = ShieldController()
+    private let countdown = PassCountdownController()
+    private var passTimers: [String: [Timer]] = [:]
     private var timer: Timer?
     /// 最近一次用的、没被限制的 App，“回到学习”时切回去
     private var lastAllowedApp: NSRunningApplication?
@@ -34,6 +36,7 @@ final class AppBlocker: NSObject {
 
         shield.onBack = { [weak self] in self?.backToStudy() }
         shield.onPass = { [weak self] app, rule in self?.grantPass(to: app, rule: rule) }
+        countdown.onEndEarly = { [weak self] bundleID in self?.endPassEarly(bundleID) }
         evaluate()
     }
 
@@ -52,6 +55,7 @@ final class AppBlocker: NSObject {
     @objc private func evaluate() {
         store.pinStrictSessions()
         store.dropExpiredPasses()
+        countdown.refresh()
         // 时段结束了，或者拿到了临时放行：收起拦截界面，App 留在前台
         if let shown = shield.app, store.blockingOccurrence(for: shown.bundleIdentifier ?? "") == nil {
             shield.dismiss(playSound: false)
@@ -121,6 +125,36 @@ final class AppBlocker: NSObject {
         store.grantPass(for: bundleID, rule: rule)
         shield.dismiss(playSound: false)
         app.activate()
+        countdown.refresh()
+        schedulePassTimers(for: bundleID)
+    }
+
+    /// 剩 1 分钟轻轻提醒一声；到点准时重新检查（不用等下一次 5 秒轮询）
+    private func schedulePassTimers(for bundleID: String) {
+        passTimers[bundleID]?.forEach { $0.invalidate() }
+        guard let end = store.passes[bundleID] else { return }
+        let chime = Timer(fire: end.addingTimeInterval(-60), interval: 0, repeats: false) { _ in
+            SoundPlayer.shared.playNote(2)
+        }
+        let expiry = Timer(fire: end.addingTimeInterval(0.2), interval: 0, repeats: false) { [weak self] _ in
+            self?.passTimers[bundleID] = nil
+            self?.evaluate()
+        }
+        [chime, expiry].forEach { RunLoop.main.add($0, forMode: .common) }
+        passTimers[bundleID] = [chime, expiry]
+    }
+
+    /// 倒计时胶囊上点了“现在结束”：收回放行，App 收起来
+    private func endPassEarly(_ bundleID: String) {
+        passTimers[bundleID]?.forEach { $0.invalidate() }
+        passTimers[bundleID] = nil
+        store.revokePass(for: bundleID)
+        // 后台 App 收不了别人的前台窗口，先借这次点击让 Focus 自己成为活跃 App
+        NSApp.activate(ignoringOtherApps: true)
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) { app.hide() }
+        SoundPlayer.shared.playNote(5)
+        if let lastAllowedApp, !lastAllowedApp.isTerminated { lastAllowedApp.activate() }
+        countdown.refresh()
     }
 }
 
