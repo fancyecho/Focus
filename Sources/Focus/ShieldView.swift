@@ -118,14 +118,16 @@ private struct LampRing: View {
                     .rotationEffect(.degrees(-90))
                     .shadow(color: color.opacity(0.8), radius: 8)
 
-                // 环头的灯火
+                // 环头的灯火。先放在 12 点钟，再整体旋转：动画时沿着圆弧走，和环的绘制同步。
+                // （直接按 sin/cos 算偏移的话，x、y 会各自直线插值，光点会斜穿圆心“飘”过去）
                 Circle()
                     .fill(.white)
                     .frame(width: 7, height: 7)
                     .shadow(color: color, radius: 6)
                     .shadow(color: color.opacity(0.8), radius: 14)
-                    .offset(x: radius * sin(2 * .pi * shown), y: -radius * cos(2 * .pi * shown))
-                    .opacity(shown > 0.005 ? 1 : 0)
+                    .offset(y: -radius)
+                    .rotationEffect(.degrees(360 * shown))
+                    .opacity(lit ? 1 : 0)
 
                 Image(nsImage: icon)
                     .resizable()
