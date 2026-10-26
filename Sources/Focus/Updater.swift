@@ -36,6 +36,9 @@ final class Updater {
     private var timer: Timer?
     private var progressObservation: NSKeyValueObservation?
 
+    /// 正在为更新重启：这时即使有严格时段也要放行退出
+    private(set) var isRelaunching = false
+
     private init() {}
 
     /// 启动后稍等一会儿检查一次，之后每 6 小时查一次
@@ -136,7 +139,10 @@ final class Updater {
             do {
                 try Installer.install(dmg: dmg, replacing: appURL, newerThan: self.currentVersion)
                 try? FileManager.default.removeItem(at: dmg)
-                DispatchQueue.main.async { Installer.relaunch(appURL) }
+                DispatchQueue.main.async {
+                    self.isRelaunching = true
+                    Installer.relaunch(appURL)
+                }
             } catch {
                 try? FileManager.default.removeItem(at: dmg)
                 DispatchQueue.main.async { self.state = .failed(error.localizedDescription) }

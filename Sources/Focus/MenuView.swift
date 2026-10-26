@@ -5,6 +5,7 @@ struct MenuView: View {
     let store: FocusStore
     let updater = Updater.shared
     let onStart: () -> Void
+    let onOpenSchedules: () -> Void
     let onQuit: () -> Void
 
     var body: some View {
@@ -24,7 +25,10 @@ struct MenuView: View {
                 .padding(.bottom, 16)
 
             WeekChart(days: store.lastWeek)
-                .padding(.bottom, 20)
+                .padding(.bottom, 18)
+
+            ScheduleStatusRow(action: onOpenSchedules)
+                .padding(.bottom, 14)
 
             Button(action: onStart) {
                 HStack {
@@ -92,9 +96,14 @@ struct MenuView: View {
             Divider().padding(.bottom, 8)
 
             HStack {
-                Button("退出 Focus", action: onQuit)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+                // 严格时段进行中不能退出，免得一退出就绕过去了
+                TimelineView(.periodic(from: .now, by: 30)) { _ in
+                    let locked = ScheduleStore.shared.hasStrictRuleActive
+                    Button(locked ? "严格时段中，暂不能退出" : "退出 Focus", action: onQuit)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .disabled(locked)
+                }
                 Spacer()
                 Button(action: { updater.check(userInitiated: true) }) {
                     Text(footerText)
@@ -302,5 +311,95 @@ private struct BrandButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .brightness(configuration.isPressed ? -0.05 : 0)
             .animation(.snappy(duration: 0.2), value: configuration.isPressed)
+    }
+}
+
+/// 卡片里的时段状态：进行中的、下一个，或者引导去设置
+private struct ScheduleStatusRow: View {
+    let store = ScheduleStore.shared
+    let action: () -> Void
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            Button(action: action) {
+                content(now: context.date)
+                    .contentShape(RoundedRectangle(cornerRadius: 14))
+            }
+            .buttonStyle(PressScaleStyle())
+        }
+    }
+
+    @ViewBuilder
+    private func content(now: Date) -> some View {
+        if let active = store.activeOccurrences(at: now).last {
+            let rule = active.rule
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    icon(for: rule)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(rule.name).font(.system(size: 13, weight: .semibold))
+                            StatusPill(text: "进行中", tint: rule.tint)
+                        }
+                        Text("\(ScheduleText.moment(active.end, from: now)) 结束 · \(ScheduleText.appList(rule.apps))暂停")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    chevron
+                }
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.primary.opacity(0.08))
+                        Capsule().fill(RuleTint.gradient(rule.tint))
+                            .frame(width: proxy.size.width * (1 - active.progress(at: now)))
+                    }
+                }
+                .frame(height: 3)
+            }
+            .padding(12)
+            .background(RuleTint.color(rule.tint).opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else if let next = store.nextOccurrence(after: now) {
+            row(icon: icon(for: next.rule),
+                title: "下一段 · \(next.rule.name)",
+                subtitle: "\(ScheduleText.moment(next.start, from: now)) 开始 · \(ScheduleText.appList(next.rule.apps))")
+        } else {
+            row(icon: Image(systemName: "calendar.badge.clock")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Brand.gradient)
+                    .frame(width: 28, height: 28),
+                title: "时段",
+                subtitle: "在固定的时间，让分心的 App 暂停")
+        }
+    }
+
+    private func row(icon: some View, title: String, subtitle: String) -> some View {
+        HStack(spacing: 10) {
+            icon
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            chevron
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func icon(for rule: BlockRule) -> some View {
+        if rule.apps.isEmpty {
+            Circle().fill(RuleTint.gradient(rule.tint)).frame(width: 10, height: 10).frame(width: 28, height: 28)
+        } else {
+            AppStack(apps: rule.apps, size: 22, limit: 2).frame(minWidth: 28)
+        }
+    }
+
+    private var chevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.tertiary)
     }
 }

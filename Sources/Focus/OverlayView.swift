@@ -261,7 +261,7 @@ private struct SummaryView: View {
 // MARK: - 氛围：暗角 + 颗粒
 
 /// 四周压暗把视线引向中央；一层极淡的颗粒让大面积模糊不显得塑料感
-private struct Atmosphere: View {
+struct Atmosphere: View {
     var body: some View {
         GeometryReader { proxy in
             let radius = hypot(proxy.size.width, proxy.size.height) / 2
@@ -444,7 +444,7 @@ private struct HoldPill: View {
 
 // MARK: - 动画工具
 
-private struct Reveal: ViewModifier {
+struct Reveal: ViewModifier {
     let shown: Bool
     let delay: Double
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -459,7 +459,7 @@ private struct Reveal: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     /// 从模糊、下沉、透明 过渡到 清晰、归位、不透明
     func reveal(_ shown: Bool, delay: Double) -> some View {
         modifier(Reveal(shown: shown, delay: delay))

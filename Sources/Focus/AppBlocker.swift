@@ -1,0 +1,185 @@
+import AppKit
+import SwiftUI
+
+/// 盯着前台 App：切到被时段限制的 App 时，盖上一层拦截界面。
+final class AppBlocker: NSObject {
+    private let store = ScheduleStore.shared
+    private let shield = ShieldController()
+    private var timer: Timer?
+    /// 最近一次用的、没被限制的 App，“回到学习”时切回去
+    private var lastAllowedApp: NSRunningApplication?
+
+    /// 专注画面显示时不拦截（它已经盖住了整个屏幕）
+    var isSuspended: () -> Bool = { false }
+
+    func start() {
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(self, selector: #selector(appActivated(_:)),
+                           name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        center.addObserver(self, selector: #selector(evaluate),
+                           name: NSWorkspace.didWakeNotification, object: nil)
+        // 时段开始时 App 可能已经在前台，临时放行也会到期，所以定时再看一眼
+        timer = Timer.scheduledTimer(timeInterval: 5, target: self, selector: #selector(evaluate),
+                                     userInfo: nil, repeats: true)
+
+        shield.onBack = { [weak self] in self?.backToStudy() }
+        shield.onPass = { [weak self] app, rule in self?.grantPass(to: app, rule: rule) }
+        evaluate()
+    }
+
+    /// 专注画面要出来了：先收起拦截界面，被限制的 App 也藏起来
+    func yieldToOverlay() {
+        shield.dismiss(hideApp: true)
+    }
+
+    @objc private func appActivated(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        check(app)
+    }
+
+    @objc private func evaluate() {
+        store.dropExpiredPasses()
+        // 时段结束了，或者拿到了临时放行：收起来，App 留在前台
+        if let shown = shield.app, store.blockingOccurrence(for: shown.bundleIdentifier ?? "") == nil {
+            shield.dismiss(hideApp: false)
+            return
+        }
+        if let front = NSWorkspace.shared.frontmostApplication { check(front) }
+    }
+
+    private func check(_ app: NSRunningApplication) {
+        guard let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier else { return }
+        guard !isSuspended(), let occurrence = store.blockingOccurrence(for: bundleID) else {
+            lastAllowedApp = app
+            // 用 ⌘Tab 切到了一个没被限制的 App
+            if shield.isShowing { shield.dismiss(hideApp: false) }
+            return
+        }
+        shield.show(app: app, occurrence: occurrence, passesLeft: store.passesLeft(for: occurrence.rule))
+    }
+
+    private func backToStudy() {
+        shield.dismiss(hideApp: true)
+        if let lastAllowedApp, !lastAllowedApp.isTerminated { lastAllowedApp.activate() }
+    }
+
+    private func grantPass(to app: NSRunningApplication, rule: BlockRule) {
+        guard let bundleID = app.bundleIdentifier else { return }
+        store.grantPass(for: bundleID, rule: rule)
+        shield.dismiss(hideApp: false)
+        app.activate()
+    }
+}
+
+/// 拦截界面的窗口：每块屏幕一层模糊，主屏上放内容。
+final class ShieldController {
+    static let holdSeconds: TimeInterval = 3
+
+    private(set) var app: NSRunningApplication?
+    private var model = ShieldModel()
+    private var windows: [(window: OverlayWindow, blur: BackdropBlurView)] = []
+    private var isDismissing = false
+
+    var onBack: () -> Void = {}
+    var onPass: (NSRunningApplication, BlockRule) -> Void = { _, _ in }
+
+    var isShowing: Bool { app != nil && !isDismissing }
+
+    func show(app: NSRunningApplication, occurrence: Occurrence, passesLeft: Int) {
+        if isShowing, self.app?.processIdentifier == app.processIdentifier {
+            // 同一个 App 又跳到前台（比如点了它的通知）：内容更新一下，焦点拿回来
+            model.occurrence = occurrence
+            model.passesLeft = passesLeft
+            NSApp.activate(ignoringOtherApps: true)
+            windows.first?.window.makeKeyAndOrderFront(nil)
+            return
+        }
+        if app != nil { tearDown() }
+
+        self.app = app
+        model = ShieldModel()
+        model.appName = app.localizedName ?? "这个 App"
+        model.appIcon = app.icon ?? AppIcons.icon(for: app.bundleIdentifier ?? "")
+        model.occurrence = occurrence
+        model.passesLeft = passesLeft
+        model.onBack = { [weak self] in self?.onBack() }
+        model.onHoldChanged = { [weak self] holding in self?.setHolding(holding) }
+        model.onHoldCompleted = { [weak self] in
+            guard let self, let app = self.app, let rule = self.model.occurrence?.rule else { return }
+            SoundPlayer.shared.playNote(4)
+            self.onPass(app, rule)
+        }
+
+        buildWindows()
+        NSApp.activate(ignoringOtherApps: true)
+        windows.first?.window.makeKeyAndOrderFront(nil)
+        windows.forEach { $0.blur.setBlurred(true, duration: 0.8) }
+        SoundPlayer.shared.playNote(0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { self.model.appeared = true }
+    }
+
+    func dismiss(hideApp: Bool) {
+        guard let app, !isDismissing else { return }
+        isDismissing = true
+        if hideApp {
+            app.hide()
+            SoundPlayer.shared.playNote(5)
+        }
+        SoundPlayer.shared.stop(.hold, fade: 0.2)
+        model.appeared = false
+        windows.forEach { $0.blur.setBlurred(false, duration: 0.5) }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.5
+            windows.forEach { $0.window.animator().alphaValue = 0 }
+        }, completionHandler: {
+            self.tearDown()
+        })
+    }
+
+    private func setHolding(_ holding: Bool) {
+        guard isShowing else { return }
+        model.holding = holding
+        if holding {
+            withAnimation(.linear(duration: Self.holdSeconds)) { model.holdProgress = 1 }
+            SoundPlayer.shared.play(.hold)
+        } else {
+            withAnimation(.spring(duration: 0.5, bounce: 0.25)) { model.holdProgress = 0 }
+            SoundPlayer.shared.stop(.hold, fade: 0.25)
+        }
+    }
+
+    private func tearDown() {
+        windows.forEach { $0.window.orderOut(nil) }
+        windows.removeAll()
+        app = nil
+        isDismissing = false
+    }
+
+    private func buildWindows() {
+        let mainScreen = NSScreen.main ?? NSScreen.screens.first
+        let screens = NSScreen.screens.filter { $0 == mainScreen } + NSScreen.screens.filter { $0 != mainScreen }
+        for screen in screens {
+            let window = OverlayWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.setFrame(screen.frame, display: false)
+            window.level = .screenSaver
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.hasShadow = false
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: .darkAqua)
+
+            let container = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            let blur = BackdropBlurView(frame: container.bounds)
+            container.addSubview(blur)
+            let content = NSHostingView(rootView: ShieldView(model: model, showsContent: screen == mainScreen))
+            content.frame = container.bounds
+            content.autoresizingMask = [.width, .height]
+            container.addSubview(content)
+
+            window.contentView = container
+            window.orderFrontRegardless()
+            windows.append((window, blur))
+        }
+    }
+}

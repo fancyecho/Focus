@@ -5,6 +5,8 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let store = FocusStore.shared
     private let overlay = OverlayController()
+    private let blocker = AppBlocker()
+    private let schedulesWindow = SchedulesWindowController()
     private var statusItem: NSStatusItem!
     private var menuPanel: MenuPanelController!
     private var hotKey: HotKey?
@@ -23,7 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuPanel = MenuPanelController(content: MenuView(
             store: store,
             onStart: { [weak self] in self?.startFromMenu() },
+            onOpenSchedules: { [weak self] in self?.openSchedules() },
             onQuit: { NSApp.terminate(nil) }))
+
+        blocker.isSuspended = { [weak self] in self?.overlay.isShowing ?? false }
+        blocker.start()
 
         // ⌥⌘F：没显示时按一下开启；显示时长按解除
         let hotKey = HotKey(keyCode: UInt32(kVK_ANSI_F), modifiers: UInt32(cmdKey | optionKey))
@@ -43,8 +49,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                          selector: #selector(checkIdle), userInfo: nil, repeats: true)
 
         if CommandLine.arguments.contains("--show") {
-            overlay.show(playSound: true)
+            showOverlay(playSound: true)
         }
+        if CommandLine.arguments.contains("--schedules") {
+            openSchedules()
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // 更新时要重启，那次放行
+        if ScheduleStore.shared.hasStrictRuleActive, !Updater.shared.isRelaunching { return .terminateCancel }
+        return .terminateNow
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -60,7 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             overlay.beginHold()
         } else {
             menuPanel.close()
-            overlay.show(playSound: true)
+            showOverlay(playSound: true)
         }
     }
 
@@ -91,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                        now.timeIntervalSince(lastWake))
         if idle >= threshold {
             // 离开的这段时间也算专注（你在书桌前做题），但最多往回算一个离开时长
-            overlay.show(since: now.addingTimeInterval(-min(idle, threshold + 10)), playSound: false)
+            showOverlay(since: now.addingTimeInterval(-min(idle, threshold + 10)), playSound: false)
         }
     }
 
@@ -104,6 +119,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startFromMenu() {
         menuPanel.close()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.overlay.show(playSound: true) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.showOverlay(playSound: true) }
+    }
+
+    private func openSchedules() {
+        menuPanel.close()
+        schedulesWindow.show()
+    }
+
+    /// 专注画面会盖住整个屏幕，拦截界面先让开
+    private func showOverlay(since start: Date = Date(), playSound: Bool) {
+        blocker.yieldToOverlay()
+        overlay.show(since: start, playSound: playSound)
     }
 }
