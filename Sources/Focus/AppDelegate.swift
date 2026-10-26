@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastWake = Date()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        BackgroundAgent.handOffIfNeeded()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = StatusIcon.image
         statusItem.button?.target = self
@@ -114,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleMenuPanel() {
         guard let button = statusItem.button else { return }
+        store.refreshBackgroundStatus()
         menuPanel.toggle(below: button)
     }
 

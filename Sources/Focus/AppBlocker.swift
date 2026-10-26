@@ -1,15 +1,19 @@
 import AppKit
 import SwiftUI
 
-/// 盯着前台 App：切到被时段限制的 App 时，盖上一层拦截界面。
+/// 盯着所有 App：被时段限制的 App 一律收起来（严格时段直接退出），
+/// 切到前台时盖上一层拦截界面。
 final class AppBlocker: NSObject {
     private let store = ScheduleStore.shared
     private let shield = ShieldController()
     private var timer: Timer?
     /// 最近一次用的、没被限制的 App，“回到学习”时切回去
     private var lastAllowedApp: NSRunningApplication?
+    /// 已经请求退出的 App 和请求时间：太久没退就强制退出
+    private var quitting: [pid_t: Date] = [:]
+    private static let forceQuitAfter: TimeInterval = 15
 
-    /// 专注画面显示时不拦截（它已经盖住了整个屏幕）
+    /// 专注画面显示时不弹拦截界面（它已经盖住了整个屏幕）
     var isSuspended: () -> Bool = { false }
 
     func start() {
@@ -18,7 +22,13 @@ final class AppBlocker: NSObject {
                            name: NSWorkspace.didActivateApplicationNotification, object: nil)
         center.addObserver(self, selector: #selector(evaluate),
                            name: NSWorkspace.didWakeNotification, object: nil)
-        // 时段开始时 App 可能已经在前台，临时放行也会到期，所以定时再看一眼
+        center.addObserver(self, selector: #selector(evaluate),
+                           name: NSWorkspace.didLaunchApplicationNotification, object: nil)
+        // 改了系统时间或时区：马上重新算
+        NotificationCenter.default.addObserver(self, selector: #selector(evaluate),
+                                               name: .NSSystemClockDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(evaluate),
+                                               name: .NSSystemTimeZoneDidChange, object: nil)
         timer = Timer.scheduledTimer(timeInterval: 5, target: self, selector: #selector(evaluate),
                                      userInfo: nil, repeats: true)
 
@@ -27,9 +37,11 @@ final class AppBlocker: NSObject {
         evaluate()
     }
 
-    /// 专注画面要出来了：先收起拦截界面，被限制的 App 也藏起来
+    /// 专注画面要出来了：先收起拦截界面，被限制的 App 也收起来
     func yieldToOverlay() {
-        shield.dismiss(hideApp: true)
+        guard let app = shield.app else { return }
+        putAway(app)
+        shield.dismiss(playSound: false)
     }
 
     @objc private func appActivated(_ notification: Notification) {
@@ -38,35 +50,76 @@ final class AppBlocker: NSObject {
     }
 
     @objc private func evaluate() {
+        store.pinStrictSessions()
         store.dropExpiredPasses()
-        // 时段结束了，或者拿到了临时放行：收起来，App 留在前台
+        // 时段结束了，或者拿到了临时放行：收起拦截界面，App 留在前台
         if let shown = shield.app, store.blockingOccurrence(for: shown.bundleIdentifier ?? "") == nil {
-            shield.dismiss(hideApp: false)
-            return
+            shield.dismiss(playSound: false)
         }
+        sweepBackgroundApps()
         if let front = NSWorkspace.shared.frontmostApplication { check(front) }
     }
 
     private func check(_ app: NSRunningApplication) {
         guard let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier else { return }
-        guard !isSuspended(), let occurrence = store.blockingOccurrence(for: bundleID) else {
+        guard let occurrence = store.blockingOccurrence(for: bundleID) else {
             lastAllowedApp = app
-            // 用 ⌘Tab 切到了一个没被限制的 App
-            if shield.isShowing { shield.dismiss(hideApp: false) }
+            // 用 ⌘Tab 切到了一个没被限制的 App：被拦的那个也要收起来，不能留在后面偷看
+            if let blocked = shield.app, shield.isShowing {
+                putAway(blocked)
+                shield.dismiss(playSound: false)
+            }
+            return
+        }
+        if isSuspended() {
+            putAway(app)
             return
         }
         shield.show(app: app, occurrence: occurrence, passesLeft: store.passesLeft(for: occurrence.rule))
     }
 
+    /// 后台开着的被限制 App：窗口露在后面也能滚动着看，所以统统收起来
+    private func sweepBackgroundApps() {
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        quitting = quitting.filter { pid, _ in NSRunningApplication(processIdentifier: pid) != nil }
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            guard let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier,
+                  app.processIdentifier != front, app.processIdentifier != shield.app?.processIdentifier,
+                  store.blockingOccurrence(for: bundleID) != nil
+            else { continue }
+            putAway(app)
+        }
+    }
+
+    /// 温和时段收起来；严格时段直接退出（后台放歌、弹消息也一并停掉）
+    private func putAway(_ app: NSRunningApplication) {
+        guard let bundleID = app.bundleIdentifier, let occurrence = store.blockingOccurrence(for: bundleID) else {
+            app.hide()
+            return
+        }
+        guard occurrence.rule.isStrict else {
+            if !app.isHidden { app.hide() }
+            return
+        }
+        if let asked = quitting[app.processIdentifier] {
+            if Date().timeIntervalSince(asked) > Self.forceQuitAfter { app.forceTerminate() }
+        } else {
+            quitting[app.processIdentifier] = Date()
+            app.hide()
+            app.terminate()
+        }
+    }
+
     private func backToStudy() {
-        shield.dismiss(hideApp: true)
+        if let app = shield.app { putAway(app) }
+        shield.dismiss(playSound: true)
         if let lastAllowedApp, !lastAllowedApp.isTerminated { lastAllowedApp.activate() }
     }
 
     private func grantPass(to app: NSRunningApplication, rule: BlockRule) {
         guard let bundleID = app.bundleIdentifier else { return }
         store.grantPass(for: bundleID, rule: rule)
-        shield.dismiss(hideApp: false)
+        shield.dismiss(playSound: false)
         app.activate()
     }
 }
@@ -118,13 +171,10 @@ final class ShieldController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { self.model.appeared = true }
     }
 
-    func dismiss(hideApp: Bool) {
-        guard let app, !isDismissing else { return }
+    func dismiss(playSound: Bool) {
+        guard app != nil, !isDismissing else { return }
         isDismissing = true
-        if hideApp {
-            app.hide()
-            SoundPlayer.shared.playNote(5)
-        }
+        if playSound { SoundPlayer.shared.playNote(5) }
         SoundPlayer.shared.stop(.hold, fade: 0.2)
         model.appeared = false
         windows.forEach { $0.blur.setBlurred(false, duration: 0.5) }

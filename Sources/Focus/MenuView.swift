@@ -86,10 +86,35 @@ struct MenuView: View {
             HStack {
                 Text("登录时启动")
                 Spacer()
-                Toggle("登录时启动", isOn: $store.launchAtLogin)
+                Toggle("登录时启动", isOn: store.keepAlive ? .constant(true) : $store.launchAtLogin)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
+                    .disabled(store.keepAlive)
+            }
+            .help(store.keepAlive ? "已开启「防止被强行退出」，它会在登录时自动启动" : "")
+            .padding(.bottom, 8)
+
+            TimelineView(.periodic(from: .now, by: 30)) { _ in
+                let locked = ScheduleStore.shared.hasStrictRuleActive && store.keepAlive
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("防止被强行退出")
+                        Spacer()
+                        Toggle("防止被强行退出", isOn: $store.keepAlive)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .disabled(locked)
+                    }
+                    if store.keepAliveNeedsApproval {
+                        Button("需要在「系统设置 › 登录项」里允许 Focus") { BackgroundAgent.openLoginItemsSettings() }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Brand.glow)
+                    }
+                }
+                .help(locked ? "严格时段进行中，不能关闭" : "被活动监视器、强制退出结束后，几秒内自动重新打开")
             }
             .padding(.bottom, 12)
 

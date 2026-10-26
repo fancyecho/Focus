@@ -32,6 +32,8 @@ cp .build/release/Focus "$APP/Contents/MacOS/Focus"
 cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp -R Resources/Sounds "$APP/Contents/Resources/Sounds"
+mkdir -p "$APP/Contents/Library"
+cp -R Resources/LaunchAgents "$APP/Contents/Library/LaunchAgents"
 codesign --force --sign - "$APP"
 
 echo "已生成 $APP"

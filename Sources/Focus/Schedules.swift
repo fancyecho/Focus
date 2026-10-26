@@ -113,6 +113,36 @@ extension BlockRule {
     }
 }
 
+// MARK: - 严格时段的“钉住”
+
+/// 严格时段开始时存一份快照，结束时刻同时用单调时钟记下来。
+/// 之后改系统时间、改时区、甚至删掉配置里的这个时段，都不会让它提前结束。
+struct StrictPin: Codable {
+    var rule: BlockRule
+    var start: Date
+    var end: Date
+    /// 单调时钟上的结束时刻（纳秒，睡眠期间也走，不受改系统时间影响）
+    var monotonicEnd: UInt64
+    /// 开机会话：重启后单调时钟归零，只能退回按墙上时间判断
+    var bootSession: String
+
+    func isValid(at now: Date) -> Bool {
+        bootSession == SystemClock.bootSession ? SystemClock.monotonic < monotonicEnd : now < end
+    }
+}
+
+enum SystemClock {
+    static var monotonic: UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) }
+
+    static let bootSession: String = {
+        var size = 0
+        sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0)
+        var buffer = [CChar](repeating: 0, count: max(size, 1))
+        sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0)
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }()
+}
+
 // MARK: - 存储
 
 /// 所有时段，以及“临时再用 5 分钟”的通行记录。存在 UserDefaults 里。
@@ -124,6 +154,7 @@ final class ScheduleStore {
 
     private static let rulesKey = "blockRules"
     private static let passCountsKey = "blockPassCounts"
+    private static let pinsKey = "strictPins"
 
     var rules: [BlockRule] {
         didSet { save() }
@@ -133,25 +164,52 @@ final class ScheduleStore {
     private(set) var passes: [String: Date] = [:]
     /// "时段 id|日期" → 当天已经用了几次临时放行
     private var passCounts: [String: Int]
+    /// 时段 id → 进行中的严格时段快照
+    private(set) var pins: [UUID: StrictPin]
 
     private init() {
         let defaults = UserDefaults.standard
         rules = defaults.data(forKey: Self.rulesKey)
             .flatMap { try? JSONDecoder().decode([BlockRule].self, from: $0) } ?? []
         passCounts = defaults.dictionary(forKey: Self.passCountsKey) as? [String: Int] ?? [:]
+        pins = defaults.data(forKey: Self.pinsKey)
+            .flatMap { try? JSONDecoder().decode([UUID: StrictPin].self, from: $0) } ?? [:]
     }
 
-    /// 这个 App 现在被哪个时段挡着（有临时放行的话就不挡）
-    func blockingOccurrence(for bundleID: String, at now: Date = Date()) -> Occurrence? {
-        if let pass = passes[bundleID], pass > now { return nil }
-        return rules
-            .filter { $0.blocks(bundleID) }
-            .compactMap { $0.activeOccurrence(at: now) }
-            .max { $0.end < $1.end }
-    }
-
+    /// 所有正在生效的时段：按时间算出来的，加上钉住的严格时段（同一个时段取结束得晚的）
     func activeOccurrences(at now: Date = Date()) -> [Occurrence] {
-        rules.compactMap { $0.activeOccurrence(at: now) }.sorted { $0.end < $1.end }
+        var byRule: [UUID: Occurrence] = [:]
+        let scheduled = rules.compactMap { $0.activeOccurrence(at: now) }
+        let pinned = pins.values.filter { $0.isValid(at: now) }.map { Occurrence(rule: $0.rule, start: $0.start, end: $0.end) }
+        for occurrence in scheduled + pinned {
+            if let existing = byRule[occurrence.rule.id], existing.end >= occurrence.end { continue }
+            byRule[occurrence.rule.id] = occurrence
+        }
+        return byRule.values.sorted { $0.end < $1.end }
+    }
+
+    /// 这个 App 现在被哪个时段挡着。临时放行只对温和时段有效，严格时段照样挡
+    func blockingOccurrence(for bundleID: String, at now: Date = Date()) -> Occurrence? {
+        let hasPass = (passes[bundleID] ?? .distantPast) > now
+        return activeOccurrences(at: now)
+            .filter { $0.rule.blocks(bundleID) && ($0.rule.isStrict || !hasPass) }
+            .max { a, b in a.rule.isStrict != b.rule.isStrict ? b.rule.isStrict : a.end < b.end }
+    }
+
+    /// 严格时段一开始就钉住；过期的钉子拔掉
+    func pinStrictSessions(at now: Date = Date()) {
+        var updated = pins.filter { $0.value.isValid(at: now) }
+        for rule in rules where rule.isStrict && updated[rule.id] == nil {
+            guard let occurrence = rule.activeOccurrence(at: now) else { continue }
+            let remaining = UInt64(max(0, occurrence.end.timeIntervalSince(now)) * 1_000_000_000)
+            updated[rule.id] = StrictPin(rule: rule, start: occurrence.start, end: occurrence.end,
+                                         monotonicEnd: SystemClock.monotonic + remaining,
+                                         bootSession: SystemClock.bootSession)
+        }
+        guard updated.keys.sorted(by: { $0.uuidString < $1.uuidString }) != pins.keys.sorted(by: { $0.uuidString < $1.uuidString })
+        else { return }
+        pins = updated
+        if let data = try? JSONEncoder().encode(pins) { UserDefaults.standard.set(data, forKey: Self.pinsKey) }
     }
 
     func nextOccurrence(after now: Date = Date()) -> Occurrence? {
@@ -160,11 +218,11 @@ final class ScheduleStore {
 
     /// 严格时段进行中：不能修改、停用、删除
     func isLocked(_ rule: BlockRule, at now: Date = Date()) -> Bool {
-        rule.isStrict && rule.activeOccurrence(at: now) != nil
+        (pins[rule.id]?.isValid(at: now) ?? false) || (rule.isStrict && rule.activeOccurrence(at: now) != nil)
     }
 
     var hasStrictRuleActive: Bool {
-        rules.contains { isLocked($0) }
+        activeOccurrences().contains { $0.rule.isStrict }
     }
 
     func passesLeft(for rule: BlockRule, at now: Date = Date()) -> Int {

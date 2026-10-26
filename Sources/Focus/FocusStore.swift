@@ -78,6 +78,32 @@ final class FocusStore {
         }
     }
 
+    /// 防止被强行退出（launchd 守护，同时包含登录时启动）
+    var keepAlive = BackgroundAgent.isEnabled {
+        didSet {
+            guard keepAlive != oldValue else { return }
+            do {
+                try BackgroundAgent.setEnabled(keepAlive)
+                // 守护本身就会在登录时启动，原来的登录项关掉，免得启动两次
+                if keepAlive, SMAppService.mainApp.status == .enabled { try? SMAppService.mainApp.unregister() }
+            } catch {
+                NSLog("Focus: 无法设置后台守护：\(error.localizedDescription)")
+            }
+            refreshBackgroundStatus()
+        }
+    }
+
+    /// 守护已注册，但还要在“系统设置 › 登录项”里允许
+    private(set) var keepAliveNeedsApproval = BackgroundAgent.needsApproval
+
+    /// 用户可能在系统设置里改过，打开卡片时重新读一下
+    func refreshBackgroundStatus() {
+        let enabled = BackgroundAgent.isEnabled
+        if keepAlive != enabled { keepAlive = enabled }
+        keepAliveNeedsApproval = BackgroundAgent.needsApproval
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
     var launchAtLogin = SMAppService.mainApp.status == .enabled {
         didSet {
             guard launchAtLogin != oldValue else { return }

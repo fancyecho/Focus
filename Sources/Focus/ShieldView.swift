@@ -182,7 +182,7 @@ private struct ShieldActions: View {
     }
 
     private var footnote: String {
-        if rule.isStrict { return "严格时段 · 结束前不能跳过" }
+        if rule.isStrict { return "严格时段 · 结束前不能跳过，回到学习时会退出 \(model.appName)" }
         if model.passesLeft == 0 { return "今天的临时使用次数已经用完了" }
         return "按回车回到学习"
     }

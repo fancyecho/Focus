@@ -140,6 +140,8 @@ private struct ScheduleSidebar: View {
                     .contentShape(RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(PressScaleStyle())
+            .keyboardShortcut("n", modifiers: .command)
+            .help("新建时段（⌘N）")
             .padding(16)
         }
     }
@@ -223,6 +225,9 @@ private struct RuleEditor: View {
     let onDelete: () -> Void
 
     @State private var confirmingDelete = false
+    @State private var editingName = false
+    @State private var hoveringName = false
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -231,7 +236,7 @@ private struct RuleEditor: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header(now: context.date)
 
-                    if locked, let active = rule.activeOccurrence(at: context.date) {
+                    if locked, let active = store.activeOccurrences(at: context.date).first(where: { $0.rule.id == rule.id }) {
                         Label("严格时段进行中，\(ScheduleText.moment(active.end)) 结束后才能修改", systemImage: "lock.fill")
                             .font(.system(size: 12, weight: .medium))
                             .padding(.horizontal, 14)
@@ -243,9 +248,9 @@ private struct RuleEditor: View {
                     VStack(alignment: .leading, spacing: 18) {
                         TimeCard(rule: $rule)
                         DaysCard(weekdays: $rule.weekdays, tint: rule.tint)
-                        ZoneCard(timeZoneID: $rule.timeZoneID)
                         AppsCard(apps: $rule.apps)
                         ModeCard(isStrict: $rule.isStrict, tint: rule.tint)
+                        ZoneCard(timeZoneID: $rule.timeZoneID)
 
                         Button("删除这个时段", role: .destructive) { confirmingDelete = true }
                             .buttonStyle(.plain)
@@ -263,6 +268,8 @@ private struct RuleEditor: View {
                 .frame(maxWidth: .infinity)
             }
         }
+        // 刚新建的时段直接进入改名（每次选中只触发一次）
+        .onAppear { if rule.name == "新时段" { editingName = true } }
         .confirmationDialog("删除「\(rule.name)」？", isPresented: $confirmingDelete) {
             Button("删除", role: .destructive, action: onDelete)
         } message: {
@@ -273,9 +280,8 @@ private struct RuleEditor: View {
     private func header(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 16) {
-                TextField("时段名称", text: $rule.name)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 28, weight: .bold))
+                nameView
+                Spacer(minLength: 12)
                 TintPicker(tint: $rule.tint)
             }
             HStack(spacing: 6) {
@@ -287,10 +293,40 @@ private struct RuleEditor: View {
         }
     }
 
+    /// 平时是标题，点一下才变成输入框，免得一打开窗口就出现光标
+    @ViewBuilder
+    private var nameView: some View {
+        if editingName {
+            TextField("时段名称", text: $rule.name)
+                .textFieldStyle(.plain)
+                .font(.system(size: 28, weight: .bold))
+                .focused($nameFocused)
+                .onSubmit { editingName = false }
+                .onChange(of: nameFocused) { _, focused in if !focused { editingName = false } }
+                .onAppear { DispatchQueue.main.async { nameFocused = true } }
+                .onExitCommand { editingName = false }
+        } else {
+            HStack(spacing: 10) {
+                Text(rule.name.isEmpty ? "未命名" : rule.name)
+                    .font(.system(size: 28, weight: .bold))
+                    .lineLimit(1)
+                Image(systemName: "pencil")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .opacity(hoveringName ? 1 : 0)
+            }
+            .contentShape(Rectangle())
+            .onHover { hoveringName = $0 }
+            .onTapGesture { if !store.isLocked(rule) { editingName = true } }
+            .animation(.smooth(duration: 0.15), value: hoveringName)
+            .help("点击改名")
+        }
+    }
+
     private func statusLine(now: Date) -> String {
         if !rule.isEnabled { return "已停用" }
         if rule.apps.isEmpty { return "还没有选要限制的 App" }
-        if let active = rule.activeOccurrence(at: now) {
+        if let active = store.activeOccurrences(at: now).first(where: { $0.rule.id == rule.id }) {
             return "进行中 · \(ScheduleText.moment(active.end, from: now)) 结束 · 还有 \(ScheduleText.remaining(until: active.end, from: now))"
         }
         if let next = rule.nextOccurrence(after: now) {
@@ -355,8 +391,9 @@ private struct TimeCard: View {
     var body: some View {
         let total = rule.windows.reduce(0) { $0 + $1.durationMinutes }
         Card(title: "时间", icon: "clock", trailing: "共 \(ScheduleText.duration(total))") {
-            DayTimeline(windows: rule.windows, tint: rule.tint, timeZone: rule.timeZone)
-                .padding(.bottom, 4)
+            DayTimeline(windows: $rule.windows, tint: rule.tint, timeZone: rule.timeZone)
+                .padding(.top, 6)
+                .padding(.bottom, 2)
 
             ForEach($rule.windows) { $window in
                 WindowRow(window: $window, tint: rule.tint, canDelete: rule.windows.count > 1) {
@@ -374,9 +411,9 @@ private struct TimeCard: View {
                 }
                 .buttonStyle(.plain)
                 Spacer()
-                if let converted = localEquivalent() {
-                    Text(converted).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
+                Text(localEquivalent() ?? "拖动色块调整时间，在空白处拖动添加一段")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
             }
         }
     }
@@ -398,78 +435,239 @@ private struct TimeCard: View {
     }
 }
 
-/// 24 小时时间轴：哪些时间被占用一目了然，竖线是这个时区的“现在”
+/// 24 小时时间轴，可以直接拖：拖两端改起止，拖中间整段平移，在空白处拖出新的一段。
+/// 按 15 分钟吸附，碰到整点时触控板会轻轻一震。竖线是这个时区的“现在”。
 private struct DayTimeline: View {
-    let windows: [TimeWindow]
+    @Binding var windows: [TimeWindow]
     let tint: Int
     let timeZone: TimeZone
 
+    private enum Drag {
+        case start(UUID)
+        case end(UUID)
+        case move(UUID, original: TimeWindow, anchor: Int)
+        case create(UUID, anchor: Int)
+
+        var id: UUID {
+            switch self {
+            case .start(let id), .end(let id), .move(let id, _, _), .create(let id, _): id
+            }
+        }
+    }
+
+    @State private var drag: Drag?
+    @State private var lastSnapped: Int?
+
+    private static let snap = 15
+    private static let edgeSlop: CGFloat = 7
+    private static let trackHeight: CGFloat = 44
+
     private struct Segment: Identifiable {
         let id: String
+        let window: UUID
         let start: Int
         let end: Int
     }
 
     private var segments: [Segment] {
         windows.flatMap { window -> [Segment] in
-            if !window.crossesMidnight {
-                return [Segment(id: "\(window.id)", start: window.start, end: window.end)]
+            let end = window.end == 0 ? 1440 : window.end
+            if !window.crossesMidnight || window.end == 0 {
+                return [Segment(id: "\(window.id)", window: window.id, start: window.start, end: end)]
             }
-            var parts = [Segment(id: "\(window.id)-a", start: window.start, end: 1440)]
-            if window.end > 0 { parts.append(Segment(id: "\(window.id)-b", start: 0, end: window.end)) }
-            return parts
+            return [Segment(id: "\(window.id)-a", window: window.id, start: window.start, end: 1440),
+                    Segment(id: "\(window.id)-b", window: window.id, start: 0, end: window.end)]
         }
     }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
-            VStack(spacing: 6) {
+            VStack(spacing: 8) {
                 GeometryReader { proxy in
                     let width = proxy.size.width
-                    let height = proxy.size.height
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.primary.opacity(0.06))
-
-                        ForEach(1..<8) { index in
-                            Rectangle()
-                                .fill(Color.primary.opacity(index % 2 == 0 ? 0.1 : 0.05))
-                                .frame(width: 1, height: height * 0.4)
-                                .offset(x: width * CGFloat(index * 3) / 24)
-                        }
-
+                    ZStack(alignment: .topLeading) {
+                        track(width: width)
                         ForEach(segments) { segment in
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(RuleTint.gradient(tint))
-                                .frame(width: max(4, width * CGFloat(segment.end - segment.start) / 1440),
-                                       height: height - 8)
-                                .offset(x: width * CGFloat(segment.start) / 1440)
-                                .shadow(color: RuleTint.color(tint).opacity(0.35), radius: 6, y: 2)
+                            segmentView(segment, width: width)
                         }
-
                         Capsule()
                             .fill(Color.primary)
-                            .frame(width: 2, height: height + 8)
-                            .offset(x: width * nowFraction(context.date) - 1)
+                            .frame(width: 2, height: Self.trackHeight + 8)
+                            .offset(x: width * nowFraction(context.date) - 1, y: -4)
+                            .allowsHitTesting(false)
+                        if let drag, let window = windows.first(where: { $0.id == drag.id }) {
+                            dragBubble(window, width: width)
+                        }
                     }
-                    .frame(height: height)
+                    .contentShape(Rectangle())
+                    .gesture(dragGesture(width: width))
+                    .onContinuousHover { phase in updateCursor(phase, width: width) }
                 }
-                .frame(height: 30)
-                .animation(.smooth(duration: 0.35), value: windows)
+                .frame(height: Self.trackHeight)
 
-                HStack {
-                    ForEach(["0:00", "6:00", "12:00", "18:00", "24:00"], id: \.self) { label in
-                        Text(label)
-                        if label != "24:00" { Spacer() }
-                    }
-                }
-                .font(.system(size: 10, weight: .medium))
-                .monospacedDigit()
-                .foregroundStyle(.tertiary)
+                hourLabels
             }
         }
         .accessibilityElement()
         .accessibilityLabel("时间轴：" + windows.map(ScheduleText.window).joined(separator: "，"))
+    }
+
+    // MARK: 画
+
+    private func track(width: CGFloat) -> some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
+            ForEach(1..<24) { hour in
+                Rectangle()
+                    .fill(Color.primary.opacity(hour % 6 == 0 ? 0.12 : 0.05))
+                    .frame(width: 1, height: hour % 6 == 0 ? Self.trackHeight * 0.5 : Self.trackHeight * 0.25)
+                    .offset(x: width * CGFloat(hour) / 24)
+            }
+        }
+        .frame(height: Self.trackHeight)
+    }
+
+    private func segmentView(_ segment: Segment, width: CGFloat) -> some View {
+        let active = drag?.id == segment.window
+        let segmentWidth = max(6, width * CGFloat(segment.end - segment.start) / 1440)
+        return RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(RuleTint.gradient(tint))
+            .overlay(alignment: .leading) { handle.opacity(segment.id.hasSuffix("-b") ? 0 : 1) }
+            .overlay(alignment: .trailing) { handle.opacity(segment.id.hasSuffix("-a") ? 0 : 1) }
+            .frame(width: segmentWidth, height: Self.trackHeight - 10)
+            .shadow(color: RuleTint.color(tint).opacity(active ? 0.6 : 0.3), radius: active ? 10 : 6, y: 2)
+            .scaleEffect(y: active ? 1.08 : 1)
+            .offset(x: width * CGFloat(segment.start) / 1440, y: 5)
+            .animation(.snappy(duration: 0.18), value: active)
+            .allowsHitTesting(false)
+    }
+
+    private var handle: some View {
+        Capsule()
+            .fill(.white.opacity(0.85))
+            .frame(width: 3, height: 14)
+            .padding(.horizontal, 4)
+    }
+
+    private func dragBubble(_ window: TimeWindow, width: CGFloat) -> some View {
+        let center = CGFloat(window.start) + CGFloat(window.durationMinutes) / 2
+        let x = min(max(width * (center.truncatingRemainder(dividingBy: 1440)) / 1440, 60), width - 60)
+        return Text(ScheduleText.window(window))
+            .font(.system(size: 11, weight: .semibold))
+            .monospacedDigit()
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(.regularMaterial, in: Capsule())
+            .overlay { Capsule().strokeBorder(Color.primary.opacity(0.1)) }
+            .fixedSize()
+            .position(x: x, y: -16)
+            .transition(.opacity)
+            .allowsHitTesting(false)
+    }
+
+    private var hourLabels: some View {
+        GeometryReader { proxy in
+            ForEach([0, 6, 12, 18, 24], id: \.self) { hour in
+                Text("\(hour):00")
+                    .font(.system(size: 10, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                    .fixedSize()
+                    .position(x: min(max(proxy.size.width * CGFloat(hour) / 24, 14), proxy.size.width - 16), y: 6)
+            }
+        }
+        .frame(height: 12)
+    }
+
+    // MARK: 拖
+
+    private func minute(at x: CGFloat, width: CGFloat) -> Int {
+        let raw = Double(x / max(width, 1)) * 1440 / Double(Self.snap)
+        return min(max(Int(raw.rounded()) * Self.snap, 0), 1440)
+    }
+
+    private func edgeX(_ minute: Int, width: CGFloat) -> CGFloat { width * CGFloat(minute) / 1440 }
+
+    /// 按下的位置决定要做什么：两端改起止，中间平移，空白处新建
+    private func target(at x: CGFloat, width: CGFloat) -> Drag {
+        for window in windows {
+            let end = window.end == 0 ? 1440 : window.end
+            if abs(x - edgeX(window.start, width: width)) <= Self.edgeSlop { return .start(window.id) }
+            if abs(x - edgeX(end, width: width)) <= Self.edgeSlop { return .end(window.id) }
+        }
+        let m = minute(at: x, width: width)
+        for window in windows {
+            let end = window.end == 0 ? 1440 : window.end
+            let inside = window.crossesMidnight && window.end != 0 ? (m >= window.start || m <= window.end) : (m >= window.start && m <= end)
+            if inside { return .move(window.id, original: window, anchor: m) }
+        }
+        return .create(UUID(), anchor: m)
+    }
+
+    private func dragGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                if drag == nil {
+                    let target = target(at: value.startLocation.x, width: width)
+                    if case .create(let id, let anchor) = target {
+                        let start = min(anchor, 1440 - Self.snap)
+                        windows.append(TimeWindow(id: id, start: start, end: start + Self.snap))
+                    }
+                    drag = target
+                    if case .move = target { NSCursor.closedHand.set() }
+                }
+                let m = minute(at: value.location.x, width: width)
+                if m != lastSnapped {
+                    if m % 60 == 0 { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) }
+                    lastSnapped = m
+                }
+                apply(m)
+            }
+            .onEnded { _ in
+                drag = nil
+                lastSnapped = nil
+                NSCursor.arrow.set()
+                // 列表按开始时间排好，和时间轴的顺序一致
+                withAnimation(.smooth) { windows.sort { $0.start < $1.start } }
+            }
+    }
+
+    private func apply(_ m: Int) {
+        guard let drag, let index = windows.firstIndex(where: { $0.id == drag.id }) else { return }
+        var window = windows[index]
+        switch drag {
+        case .start:
+            let start = m % 1440
+            guard start != window.end else { return }
+            window.start = start
+        case .end:
+            let end = m % 1440
+            guard end != window.start else { return }
+            window.end = end
+        case .move(_, let original, let anchor):
+            let delta = m - anchor
+            window.start = ((original.start + delta) % 1440 + 1440) % 1440
+            window.end = ((original.end + delta) % 1440 + 1440) % 1440
+        case .create(_, let anchor):
+            let lower = min(anchor, m), upper = max(anchor, m)
+            window.start = min(lower, 1440 - Self.snap)
+            window.end = max(upper, window.start + Self.snap) % 1440
+        }
+        windows[index] = window
+    }
+
+    private func updateCursor(_ phase: HoverPhase, width: CGFloat) {
+        guard drag == nil else { return }
+        guard case .active(let point) = phase else {
+            NSCursor.arrow.set()
+            return
+        }
+        switch target(at: point.x, width: width) {
+        case .start, .end: NSCursor.resizeLeftRight.set()
+        case .move: NSCursor.openHand.set()
+        case .create: NSCursor.crosshair.set()
+        }
     }
 
     private func nowFraction(_ date: Date) -> CGFloat {
@@ -550,34 +748,64 @@ private struct DaysCard: View {
 
     private static let order = [2, 3, 4, 5, 6, 7, 1]
     private static let names = [2: "一", 3: "二", 4: "三", 5: "四", 6: "五", 7: "六", 1: "日"]
+    private static let segment: CGFloat = 42
+    private static let height: CGFloat = 34
+
+    /// 连在一起的选中天数画成一整条胶囊，比七个独立的圆点轻
+    private var runs: [(start: Int, count: Int)] {
+        var result: [(Int, Int)] = []
+        for (index, day) in Self.order.enumerated() where weekdays.contains(day) {
+            if let last = result.last, last.0 + last.1 == index {
+                result[result.count - 1].1 += 1
+            } else {
+                result.append((index, 1))
+            }
+        }
+        return result
+    }
 
     var body: some View {
         Card(title: "重复", icon: "repeat", trailing: ScheduleText.weekdays(weekdays)) {
-            HStack(spacing: 8) {
-                ForEach(Self.order, id: \.self) { day in
-                    let on = weekdays.contains(day)
-                    Text(Self.names[day] ?? "")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(on ? .white : .primary)
-                        .frame(width: 34, height: 34)
-                        .background {
-                            Circle().fill(on ? AnyShapeStyle(RuleTint.gradient(tint)) : AnyShapeStyle(Color.primary.opacity(0.06)))
+            HStack(spacing: 16) {
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.06))
+                    ForEach(runs, id: \.start) { run in
+                        Capsule()
+                            .fill(RuleTint.gradient(tint))
+                            .frame(width: Self.segment * CGFloat(run.count) - 4, height: Self.height - 4)
+                            .offset(x: Self.segment * CGFloat(run.start) + 2)
+                            .shadow(color: RuleTint.color(tint).opacity(0.3), radius: 4, y: 1)
+                    }
+                    HStack(spacing: 0) {
+                        ForEach(Self.order, id: \.self) { day in
+                            let on = weekdays.contains(day)
+                            Text(Self.names[day] ?? "")
+                                .font(.system(size: 13, weight: on ? .semibold : .regular))
+                                .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                                .frame(width: Self.segment, height: Self.height)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    withAnimation(.snappy(duration: 0.22)) {
+                                        if on { weekdays.remove(day) } else { weekdays.insert(day) }
+                                    }
+                                }
+                                .accessibilityLabel("星期" + (Self.names[day] ?? ""))
+                                .accessibilityAddTraits(on ? [.isSelected, .isButton] : .isButton)
                         }
-                        .contentShape(Circle())
-                        .onTapGesture {
-                            withAnimation(.snappy(duration: 0.2)) {
-                                if on { weekdays.remove(day) } else { weekdays.insert(day) }
-                            }
-                        }
-                        .accessibilityLabel("星期" + (Self.names[day] ?? ""))
-                        .accessibilityAddTraits(on ? [.isSelected, .isButton] : .isButton)
+                    }
                 }
-                Spacer(minLength: 12)
-                ForEach([("每天", Set(1...7)), ("工作日", Set([2, 3, 4, 5, 6])), ("周末", Set([1, 7]))], id: \.0) { preset in
-                    Button(preset.0) { withAnimation(.snappy(duration: 0.2)) { weekdays = preset.1 } }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: weekdays == preset.1 ? .semibold : .regular))
-                        .foregroundStyle(weekdays == preset.1 ? AnyShapeStyle(RuleTint.color(tint)) : AnyShapeStyle(.secondary))
+                .frame(width: Self.segment * 7, height: Self.height)
+                .animation(.snappy(duration: 0.22), value: weekdays)
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 12) {
+                    ForEach([("每天", Set(1...7)), ("工作日", Set([2, 3, 4, 5, 6])), ("周末", Set([1, 7]))], id: \.0) { preset in
+                        Button(preset.0) { withAnimation(.snappy(duration: 0.22)) { weekdays = preset.1 } }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: weekdays == preset.1 ? .semibold : .regular))
+                            .foregroundStyle(weekdays == preset.1 ? AnyShapeStyle(RuleTint.color(tint)) : AnyShapeStyle(.secondary))
+                    }
                 }
             }
         }
@@ -892,16 +1120,65 @@ private struct AppPicker: View {
 private struct ModeCard: View {
     @Binding var isStrict: Bool
     let tint: Int
+    let focusStore = FocusStore.shared
+
+    private static let guarantees = [
+        "被暂停的 App 会被直接退出，后台播放、消息也一起停下",
+        "时段内不能跳过，也不能修改、停用、删除这个时段",
+        "改系统时间、换时区，都不会让它提前结束",
+        "Focus 不能从菜单退出；被强行结束后会自动重开",
+    ]
 
     var body: some View {
         Card(title: "打开被暂停的 App 时", icon: "hand.raised") {
             HStack(spacing: 12) {
                 option(strict: false, title: "温和", icon: "leaf",
-                       text: "可以按住按钮再用 \(ScheduleStore.passMinutes) 分钟，每天最多 \(ScheduleStore.passesPerDay) 次")
+                       text: "收起 App。可以按住按钮再用 \(ScheduleStore.passMinutes) 分钟，每天最多 \(ScheduleStore.passesPerDay) 次")
                 option(strict: true, title: "严格", icon: "lock",
-                       text: "时段进行中不能跳过，也不能修改、停用、删除这个时段")
+                       text: "没有商量的余地，到点才结束")
+            }
+
+            if isStrict {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(Self.guarantees, id: \.self) { line in
+                        Label {
+                            Text(line)
+                        } icon: {
+                            Image(systemName: "checkmark").foregroundStyle(RuleTint.color(tint))
+                        }
+                    }
+                }
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+
+                if !focusStore.keepAlive {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("现在 Focus 被强行结束就不会重开。打开「防止被强行退出」，最后一条才成立。")
+                            .font(.system(size: 11.5))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Button("打开") { focusStore.keepAlive = true }
+                            .controlSize(.small)
+                    }
+                    .padding(12)
+                    .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } else if focusStore.keepAliveNeedsApproval {
+                    HStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("还需要在「系统设置 › 登录项」里允许 Focus 在后台运行")
+                            .font(.system(size: 11.5))
+                        Spacer(minLength: 8)
+                        Button("去设置") { BackgroundAgent.openLoginItemsSettings() }
+                            .controlSize(.small)
+                    }
+                    .padding(12)
+                    .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
             }
         }
+        .animation(.smooth(duration: 0.3), value: isStrict)
     }
 
     private func option(strict: Bool, title: String, icon: String, text: String) -> some View {
@@ -916,7 +1193,7 @@ private struct ModeCard: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 86, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
         .background(selected ? RuleTint.color(tint).opacity(0.1) : Color.primary.opacity(0.03),
                     in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
