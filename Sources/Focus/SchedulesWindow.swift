@@ -280,12 +280,10 @@ private struct RuleEditor: View {
                     }
 
                     VStack(alignment: .leading, spacing: 18) {
+                        TargetsCard(apps: $rule.apps, sites: $rule.sites, tint: rule.tint)
                         TimeCard(rule: $rule)
                         DaysCard(weekdays: $rule.weekdays, tint: rule.tint)
-                        AppsCard(apps: $rule.apps)
-                        SitesCard(sites: $rule.sites, tint: rule.tint)
                         ModeCard(isStrict: $rule.isStrict, tint: rule.tint)
-                        ZoneCard(timeZoneID: $rule.timeZoneID)
 
                         Button("删除这个时段", role: .destructive) { confirmingDelete = true }
                             .buttonStyle(.plain)
@@ -301,6 +299,17 @@ private struct RuleEditor: View {
                 .padding(.bottom, 36)
                 .frame(maxWidth: 660, alignment: .leading)
                 .frame(maxWidth: .infinity)
+                .environment(\.cardTint, rule.tint)
+                // 标题后面一团时段颜色的柔光
+                .background(alignment: .top) {
+                    Circle()
+                        .fill(RuleTint.color(rule.tint).opacity(0.2))
+                        .frame(width: 520, height: 520)
+                        .blur(radius: 110)
+                        .offset(x: -160, y: -330)
+                        .allowsHitTesting(false)
+                        .animation(.smooth(duration: 0.6), value: rule.tint)
+                }
             }
         }
         // 刚新建的时段直接进入改名（每次选中只触发一次）
@@ -319,12 +328,7 @@ private struct RuleEditor: View {
                 Spacer(minLength: 12)
                 TintPicker(tint: $rule.tint)
             }
-            HStack(spacing: 6) {
-                Circle().fill(RuleTint.color(rule.tint)).frame(width: 6, height: 6)
-                Text(statusLine(now: now))
-            }
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(.secondary)
+            StatusCapsule(rule: rule, store: store, now: now)
         }
     }
 
@@ -334,7 +338,7 @@ private struct RuleEditor: View {
         if editingName {
             TextField("时段名称", text: $rule.name)
                 .textFieldStyle(.plain)
-                .font(.system(size: 28, weight: .bold))
+                .font(.system(size: 30, weight: .bold))
                 .focused($nameFocused)
                 .onSubmit { editingName = false }
                 .onChange(of: nameFocused) { _, focused in if !focused { editingName = false } }
@@ -343,7 +347,7 @@ private struct RuleEditor: View {
         } else {
             HStack(spacing: 10) {
                 Text(rule.name.isEmpty ? "未命名" : rule.name)
-                    .font(.system(size: 28, weight: .bold))
+                    .font(.system(size: 30, weight: .bold))
                     .lineLimit(1)
                 Image(systemName: "pencil")
                     .font(.system(size: 14, weight: .semibold))
@@ -357,17 +361,61 @@ private struct RuleEditor: View {
             .help("点击改名")
         }
     }
+}
 
-    private func statusLine(now: Date) -> String {
-        if !rule.isEnabled { return "已停用" }
-        if rule.hasNoTargets { return "还没有选要暂停的 App 或网站" }
-        if let active = store.activeOccurrences(at: now).first(where: { $0.rule.id == rule.id }) {
-            return "进行中 · \(ScheduleText.moment(active.end, from: now)) 结束 · 还有 \(ScheduleText.remaining(until: active.end, from: now))"
+/// 标题下面的状态胶囊：进行中的带一个剩余进度小圆环
+private struct StatusCapsule: View {
+    let rule: BlockRule
+    let store: ScheduleStore
+    let now: Date
+
+    var body: some View {
+        let tint = RuleTint.color(rule.tint)
+        HStack(spacing: 7) {
+            switch state {
+            case .active(let occurrence):
+                ZStack {
+                    Circle().stroke(tint.opacity(0.25), lineWidth: 2)
+                    Circle()
+                        .trim(from: 0, to: 1 - occurrence.progress(at: now))
+                        .stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 12, height: 12)
+                Text("进行中 · \(ScheduleText.moment(occurrence.end, from: now)) 结束 · 还剩 \(ScheduleText.remaining(until: occurrence.end, from: now))")
+            case .next(let occurrence):
+                Image(systemName: "clock")
+                Text("下一次 · \(ScheduleText.moment(occurrence.start, from: now)) 开始")
+            case .message(let icon, let text):
+                Image(systemName: icon)
+                Text(text)
+            }
         }
-        if let next = rule.nextOccurrence(after: now) {
-            return "下一次 · \(ScheduleText.moment(next.start, from: now)) 开始"
-        }
-        return "当前设置下不会生效，选一下重复的日子"
+        .font(.system(size: 12, weight: .medium))
+        .monospacedDigit()
+        .foregroundStyle(isActive ? AnyShapeStyle(tint) : AnyShapeStyle(.secondary))
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .background(isActive ? tint.opacity(0.14) : Color.primary.opacity(0.055), in: Capsule())
+        .contentTransition(.interpolate)
+        .animation(.smooth, value: isActive)
+    }
+
+    private enum State {
+        case active(Occurrence), next(Occurrence), message(String, String)
+    }
+
+    private var isActive: Bool {
+        if case .active = state { return true }
+        return false
+    }
+
+    private var state: State {
+        if !rule.isEnabled { return .message("pause.circle", "已停用") }
+        if rule.hasNoTargets { return .message("exclamationmark.circle", "还没有选要暂停的 App 或网站") }
+        if let active = store.activeOccurrences(at: now).first(where: { $0.rule.id == rule.id }) { return .active(active) }
+        if let next = rule.nextOccurrence(after: now) { return .next(next) }
+        return .message("calendar.badge.exclamationmark", "当前设置下不会生效，选一下重复的日子")
     }
 }
 
@@ -391,17 +439,36 @@ private struct TintPicker: View {
     }
 }
 
+private struct CardTintKey: EnvironmentKey {
+    static let defaultValue: Int? = nil
+}
+
+extension EnvironmentValues {
+    /// 卡片标题图标的颜色：编辑时段时跟着时段颜色走
+    var cardTint: Int? {
+        get { self[CardTintKey.self] }
+        set { self[CardTintKey.self] = newValue }
+    }
+}
+
 /// 设置区的卡片
 private struct Card<Content: View>: View {
     let title: String
     let icon: String
     var trailing: String?
     @ViewBuilder let content: Content
+    @Environment(\.cardTint) private var tint
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Label(title, systemImage: icon)
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(tint.map { AnyShapeStyle(RuleTint.color($0)) } ?? AnyShapeStyle(.secondary))
+                    .frame(width: 24, height: 24)
+                    .background((tint.map { RuleTint.color($0) } ?? .primary).opacity(0.13),
+                                in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                Text(title)
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 if let trailing {
@@ -446,7 +513,7 @@ private struct TimeCard: View {
                 }
                 .buttonStyle(.plain)
                 Spacer()
-                Text(localEquivalent() ?? "拖动色块调整时间，在空白处拖动添加一段")
+                Text("拖动色块调整时间，在空白处拖动添加一段")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -457,16 +524,6 @@ private struct TimeCard: View {
     private func nextWindow() -> TimeWindow {
         let start = ((rule.windows.last?.end ?? 18 * 60) + 60) % 1440
         return TimeWindow(start: start, end: (start + 120) % 1440)
-    }
-
-    /// 时段用的不是本机时区时，告诉用户下一次换算到本地是几点
-    private func localEquivalent() -> String? {
-        guard rule.timeZone.identifier != TimeZone.autoupdatingCurrent.identifier else { return nil }
-        var probe = rule
-        probe.isEnabled = true
-        let now = Date()
-        guard let next = probe.activeOccurrence(at: now) ?? probe.nextOccurrence(after: now) else { return nil }
-        return "下一次在你这里是 \(ScheduleText.span(next.start, next.end, from: now))"
     }
 }
 
@@ -990,36 +1047,64 @@ private struct TimeZonePicker: View {
     }
 }
 
-// MARK: App
+// MARK: 暂停什么
 
-private struct AppsCard: View {
+/// 暂停的 App 与网站放在同一张卡片里：已添加的统一用小块显示，下面并排是“添加 App”和网址输入框
+private struct TargetsCard: View {
     @Binding var apps: [BlockedApp]
-    @State private var picking = false
+    @Binding var sites: [BlockedSite]
+    let tint: Int
+    @State private var input = ""
+    @State private var invalid = false
+    @State private var pickingApp = false
+    let icons = SiteIcons.shared
+    let access = BrowserAccess.shared
+
+    private var unusedSuggestions: [BlockedSite] {
+        BlockedSite.suggestions.filter { suggestion in !sites.contains { $0.pattern == suggestion.pattern } }
+    }
+
+    private var countText: String? {
+        let parts = [apps.isEmpty ? nil : "\(apps.count) 个 App", sites.isEmpty ? nil : "\(sites.count) 个网站"].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 
     var body: some View {
-        Card(title: "暂停的 App", icon: "app.badge", trailing: apps.isEmpty ? nil : "\(apps.count) 个") {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 10)], alignment: .leading, spacing: 10) {
-                ForEach(apps) { app in
-                    AppTile(app: app) {
-                        withAnimation(.smooth) { apps.removeAll { $0.bundleID == app.bundleID } }
-                    }
-                    .transition(.scale(scale: 0.8).combined(with: .opacity))
-                }
-                Button { picking = true } label: {
-                    VStack(spacing: 6) {
-                        Image(systemName: "plus").font(.system(size: 18, weight: .medium))
-                        Text("添加").font(.system(size: 11, weight: .medium))
-                    }
+        Card(title: "暂停的 App 与网站", icon: "pause.circle", trailing: countText) {
+            if apps.isEmpty && sites.isEmpty {
+                Text("选几个容易分心的 App 或网站。时段里打开它们，就会被轻轻拦下。")
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                    .frame(width: 84, height: 84)
-                    .background {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.18), style: StrokeStyle(lineWidth: 1.2, dash: [4, 4]))
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 172), spacing: 8)], alignment: .leading, spacing: 8) {
+                    ForEach(apps) { app in
+                        TargetChip(icon: AppIcons.icon(for: app.bundleID), title: app.name, subtitle: "App", roundsIcon: false) {
+                            withAnimation(.smooth) { apps.removeAll { $0.bundleID == app.bundleID } }
+                        }
+                        .transition(.scale(scale: 0.85).combined(with: .opacity))
                     }
-                    .contentShape(RoundedRectangle(cornerRadius: 14))
+                    ForEach(sites) { site in
+                        TargetChip(icon: icons.icon(for: site), title: site.displayName,
+                                   subtitle: site.name == nil ? "网站" : site.pattern, roundsIcon: true) {
+                            withAnimation(.smooth) { sites.removeAll { $0.pattern == site.pattern } }
+                        }
+                        .help(site.pattern)
+                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button { pickingApp = true } label: {
+                    Label("添加 App", systemImage: "plus.app")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 9))
                 }
                 .buttonStyle(PressScaleStyle())
-                .popover(isPresented: $picking, arrowEdge: .bottom) {
+                .popover(isPresented: $pickingApp, arrowEdge: .bottom) {
                     AppPicker(selected: Set(apps.map(\.bundleID))) { picked in
                         withAnimation(.smooth) {
                             for app in picked where !apps.contains(where: { $0.bundleID == app.bundleID }) {
@@ -1028,42 +1113,124 @@ private struct AppsCard: View {
                         }
                     }
                 }
+
+                HStack(spacing: 8) {
+                    Image(systemName: "link").foregroundStyle(.tertiary)
+                    TextField("输入网址，比如 bilibili.com 或 youtube.com/shorts", text: $input)
+                        .textFieldStyle(.plain)
+                        .onSubmit(addTyped)
+                        .onChange(of: input) { invalid = false }
+                    if !input.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Button(action: addTyped) {
+                            Image(systemName: "return")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(RuleTint.color(tint))
+                        }
+                        .buttonStyle(.plain)
+                        .help("添加这个网站")
+                        .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(invalid ? Color.red.opacity(0.6) : .clear)
+                }
+                .modifier(Shake(attempts: invalid ? 1 : 0))
+                .animation(.default, value: invalid)
+                .animation(.smooth(duration: 0.2), value: input.isEmpty)
+            }
+            if invalid {
+                Text("这看起来不像网址，试试 bilibili.com 这样的写法")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red.opacity(0.8))
+            }
+
+            if !unusedSuggestions.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("常用网站").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], alignment: .leading, spacing: 6) {
+                        ForEach(unusedSuggestions) { suggestion in
+                            Button {
+                                withAnimation(.smooth) { sites.append(suggestion) }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(nsImage: icons.icon(for: suggestion))
+                                        .resizable()
+                                        .frame(width: 14, height: 14)
+                                        .clipShape(RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                                    Text(suggestion.displayName).font(.system(size: 12)).lineLimit(1)
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "plus").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 6)
+                                .background(Color.primary.opacity(0.045), in: Capsule())
+                                .contentShape(Capsule())
+                            }
+                            .buttonStyle(PressScaleStyle())
+                            .help(suggestion.pattern)
+                        }
+                    }
+                }
+            }
+
+            if !sites.isEmpty {
+                Divider().padding(.vertical, 2)
+                BrowserAccessRow(access: access)
             }
         }
     }
+
+    private func addTyped() {
+        guard let pattern = BlockedSite.normalize(input) else {
+            invalid = true
+            return
+        }
+        if !sites.contains(where: { $0.pattern == pattern }) {
+            let known = BlockedSite.suggestions.first { $0.pattern == pattern }
+            withAnimation(.smooth) { sites.append(known ?? BlockedSite(pattern: pattern, name: nil)) }
+        }
+        input = ""
+    }
 }
 
-private struct AppTile: View {
-    let app: BlockedApp
+/// 已添加的 App 或网站：图标 + 名字 + 一行小字，鼠标移上去出现移除按钮
+private struct TargetChip: View {
+    let icon: NSImage
+    let title: String
+    let subtitle: String
+    let roundsIcon: Bool
     let onRemove: () -> Void
     @State private var hovering = false
 
     var body: some View {
-        VStack(spacing: 6) {
-            Image(nsImage: AppIcons.icon(for: app.bundleID))
+        HStack(spacing: 9) {
+            Image(nsImage: icon)
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 40, height: 40)
-            Text(app.name)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .truncationMode(.tail)
-        }
-        .padding(.horizontal, 6)
-        .frame(width: 84, height: 84)
-        .background(Color.primary.opacity(hovering ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(alignment: .topTrailing) {
+                .frame(width: roundsIcon ? 22 : 26, height: roundsIcon ? 22 : 26)
+                .clipShape(RoundedRectangle(cornerRadius: roundsIcon ? 5.5 : 0, style: .continuous))
+                .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                Text(subtitle).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 4)
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 15))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .gray)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
-            .offset(x: 5, y: -5)
             .opacity(hovering ? 1 : 0)
-            .accessibilityLabel("移除 \(app.name)")
+            .accessibilityLabel("移除 \(title)")
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(hovering ? 0.08 : 0.045), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         .onHover { hovering = $0 }
         .animation(.smooth(duration: 0.18), value: hovering)
     }
@@ -1150,148 +1317,6 @@ private struct AppPicker: View {
     }
 }
 
-// MARK: 网站
-
-/// 暂停的网站：和 App 分开设置。输入网址，或者点常用网站；下面显示各个浏览器有没有授权读网址
-private struct SitesCard: View {
-    @Binding var sites: [BlockedSite]
-    let tint: Int
-    @State private var input = ""
-    @State private var invalid = false
-    let icons = SiteIcons.shared
-    let access = BrowserAccess.shared
-
-    private var unusedSuggestions: [BlockedSite] {
-        BlockedSite.suggestions.filter { suggestion in !sites.contains { $0.pattern == suggestion.pattern } }
-    }
-
-    var body: some View {
-        Card(title: "暂停的网站", icon: "network", trailing: sites.isEmpty ? nil : "\(sites.count) 个") {
-            if !sites.isEmpty {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 172), spacing: 8)], alignment: .leading, spacing: 8) {
-                    ForEach(sites) { site in
-                        SiteChip(site: site, icon: icons.icon(for: site)) {
-                            withAnimation(.smooth) { sites.removeAll { $0.pattern == site.pattern } }
-                        }
-                        .transition(.scale(scale: 0.85).combined(with: .opacity))
-                    }
-                }
-            }
-
-            HStack(spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "link").foregroundStyle(.tertiary)
-                    TextField("输入网址，比如 bilibili.com 或 youtube.com/shorts", text: $input)
-                        .textFieldStyle(.plain)
-                        .onSubmit(addTyped)
-                        .onChange(of: input) { invalid = false }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .strokeBorder(invalid ? Color.red.opacity(0.6) : .clear)
-                }
-                .modifier(Shake(attempts: invalid ? 1 : 0))
-                .animation(.default, value: invalid)
-
-                Button("添加", action: addTyped)
-                    .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            if invalid {
-                Text("这看起来不像网址，试试 bilibili.com 这样的写法")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red.opacity(0.8))
-            }
-
-            if !unusedSuggestions.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("常用").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], alignment: .leading, spacing: 6) {
-                        ForEach(unusedSuggestions) { suggestion in
-                            Button {
-                                withAnimation(.smooth) { sites.append(suggestion) }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(nsImage: icons.icon(for: suggestion))
-                                        .resizable()
-                                        .frame(width: 14, height: 14)
-                                        .clipShape(RoundedRectangle(cornerRadius: 3.5, style: .continuous))
-                                    Text(suggestion.displayName).font(.system(size: 12)).lineLimit(1)
-                                    Spacer(minLength: 0)
-                                    Image(systemName: "plus").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
-                                }
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 6)
-                                .background(Color.primary.opacity(0.045), in: Capsule())
-                                .contentShape(Capsule())
-                            }
-                            .buttonStyle(PressScaleStyle())
-                            .help(suggestion.pattern)
-                        }
-                    }
-                }
-            }
-
-            if !sites.isEmpty {
-                Divider().padding(.vertical, 2)
-                BrowserAccessRow(access: access)
-            }
-        }
-    }
-
-    private func addTyped() {
-        guard let pattern = BlockedSite.normalize(input) else {
-            invalid = true
-            return
-        }
-        if !sites.contains(where: { $0.pattern == pattern }) {
-            let known = BlockedSite.suggestions.first { $0.pattern == pattern }
-            withAnimation(.smooth) { sites.append(known ?? BlockedSite(pattern: pattern, name: nil)) }
-        }
-        input = ""
-    }
-}
-
-private struct SiteChip: View {
-    let site: BlockedSite
-    let icon: NSImage
-    let onRemove: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 9) {
-            Image(nsImage: icon)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 22, height: 22)
-                .clipShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
-            VStack(alignment: .leading, spacing: 0) {
-                Text(site.displayName).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
-                if site.name != nil {
-                    Text(site.pattern).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            Spacer(minLength: 4)
-            Button(action: onRemove) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
-            }
-            .buttonStyle(.plain)
-            .opacity(hovering ? 1 : 0)
-            .accessibilityLabel("移除 \(site.displayName)")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.primary.opacity(hovering ? 0.08 : 0.045), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .onHover { hovering = $0 }
-        .animation(.smooth(duration: 0.18), value: hovering)
-        .help(site.pattern)
-    }
-}
-
 /// 每个装了的浏览器有没有允许 Focus 读网址。没授权的给一个按钮，点了弹系统授权框
 private struct BrowserAccessRow: View {
     let access: BrowserAccess
@@ -1366,7 +1391,7 @@ private struct ModeCard: View {
     let focusStore = FocusStore.shared
 
     private static let guarantees = [
-        "被暂停的 App 会被直接退出，后台播放、消息也一起停下",
+        "被暂停的 App 直接退出、网站标签页直接关掉，后台播放也一起停下",
         "时段内不能跳过，也不能修改、停用、删除这个时段",
         "改系统时间、换时区，都不会让它提前结束",
         "Focus 不能从菜单退出；被强行结束后会自动重开",
@@ -1595,6 +1620,7 @@ struct AppStack: View {
 /// 设置页：从菜单卡片里搬过来的开关，分组、每项带一句说明
 private struct SettingsPane: View {
     @Bindable var focus = FocusStore.shared
+    @Bindable var clock = ScheduleClock.shared
     let updater = Updater.shared
 
     var body: some View {
@@ -1630,6 +1656,15 @@ private struct SettingsPane: View {
                         row("音效", "开启专注、打字解锁、回到学习时的轻声提示；离开电脑自动触发时始终静音") {
                             Toggle("音效", isOn: $focus.soundEnabled).labelsHidden().toggleStyle(.switch)
                         }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        ZoneCard(timeZoneID: $clock.timeZoneID)
+                            .disabled(strictActive)
+                        Text(strictActive ? "严格时段进行中，暂时不能改时区" : "所有时段都按这个时区的钟表时间生效，界面上的时刻也按它显示")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 4)
                     }
 
                     Card(title: "启动与守护", icon: "shield.lefthalf.filled") {

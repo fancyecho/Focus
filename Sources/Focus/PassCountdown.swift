@@ -94,7 +94,9 @@ private struct PassPill: View {
     let now: Date
     let onEndEarly: () -> Void
 
-    @State private var hovering = false
+    /// 鼠标停一会儿才展开、离开一会儿才收起，划过时不会闪
+    @State private var expanded = false
+    @State private var hoverWork: DispatchWorkItem?
 
     private static let total = TimeInterval(ScheduleStore.passMinutes * 60)
     private static let urgentColor = Color(red: 1.0, green: 0.42, blue: 0.36)
@@ -111,6 +113,13 @@ private struct PassPill: View {
 
     private var icon: NSImage {
         site.map { SiteIcons.shared.icon(for: $0) } ?? AppIcons.icon(for: bundleID)
+    }
+
+    private func hoverChanged(_ hovering: Bool) {
+        hoverWork?.cancel()
+        let work = DispatchWorkItem { expanded = hovering }
+        hoverWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (hovering ? 0.25 : 0.35), execute: work)
     }
 
     private var appName: String {
@@ -157,32 +166,51 @@ private struct PassPill: View {
             }
             .fixedSize()
 
-            if hovering {
-                Button(action: onEndEarly) {
-                    Text("现在结束")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 6)
-                        .background(Brand.gradient, in: .capsule)
-                        .contentShape(Capsule())
+            if expanded {
+                HStack(spacing: 10) {
+                    Rectangle()
+                        .fill(.primary.opacity(0.15))
+                        .frame(width: 1, height: 18)
+                    EndButton(action: onEndEarly)
                 }
-                .buttonStyle(PressScaleStyle())
-                .transition(.blurReplace.combined(with: ScaleTransition(0.8, anchor: .leading)))
-                .accessibilityHint("提前结束这次临时使用，App 会被收起")
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .offset(x: 10)).animation(.smooth(duration: 0.35).delay(0.06)),
+                    removal: .opacity.animation(.easeOut(duration: 0.12))))
+                .accessibilityHint("提前结束这次临时使用")
             }
         }
         .padding(.leading, 7)
-        .padding(.trailing, hovering ? 7 : 16)
+        .padding(.trailing, expanded ? 8 : 16)
         .padding(.vertical, 6)
         .glassEffect(.regular, in: .capsule)
         .shadow(color: (urgent ? Self.urgentColor : Brand.glow).opacity(breathing ? 0.55 : 0.18),
                 radius: breathing ? 16 : 10, y: 3)
         .animation(.easeInOut(duration: 0.9), value: breathing)
         .contentShape(Capsule())
-        .onHover { hovering = $0 }
-        .animation(.spring(duration: 0.4, bounce: 0.25), value: hovering)
+        .onHover(perform: hoverChanged)
+        .animation(.smooth(duration: 0.4), value: expanded)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(appName) 临时使用，还剩 \(remaining / 60) 分 \(remaining % 60) 秒")
+    }
+}
+
+/// 胶囊里的“结束”：平时只是一行安静的字，指上去才浮出浅色底
+private struct EndButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("结束")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(hovering ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(hovering ? 0.12 : 0), in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(PressScaleStyle())
+        .onHover { hovering = $0 }
+        .animation(.smooth(duration: 0.18), value: hovering)
     }
 }

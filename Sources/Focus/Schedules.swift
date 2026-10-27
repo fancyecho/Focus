@@ -29,7 +29,8 @@ struct BlockRule: Codable, Hashable, Identifiable {
     var name: String
     var tint: Int
     var isEnabled = true
-    /// nil = 跟随系统时区（出差、换时区时自动跟着变）
+    /// 旧版本每个时段单独设时区，现在改成整个 App 共用一个（见 ScheduleClock）。
+    /// 留着这个字段只为读旧数据、做一次迁移
     var timeZoneID: String?
     /// Calendar 的星期：1 = 周日 … 7 = 周六
     var weekdays: Set<Int>
@@ -40,9 +41,8 @@ struct BlockRule: Codable, Hashable, Identifiable {
     /// 暂停的网站，和 App 分开设置
     var sites: [BlockedSite] = []
 
-    var timeZone: TimeZone {
-        timeZoneID.flatMap(TimeZone.init(identifier:)) ?? .autoupdatingCurrent
-    }
+    /// 所有时段共用 App 设置里的时区
+    var timeZone: TimeZone { ScheduleClock.timeZone }
 
     var calendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
@@ -144,6 +144,44 @@ extension BlockRule {
     }
 }
 
+// MARK: - 时区
+
+/// 整个 App 共用的时区：时段按它的钟表时间生效，界面上的时刻也按它显示。nil = 跟随系统
+@Observable
+final class ScheduleClock {
+    static let shared = ScheduleClock()
+    private static let key = "scheduleTimeZoneID"
+    private static let migratedKey = "scheduleTimeZoneMigrated"
+
+    var timeZoneID: String? {
+        didSet { UserDefaults.standard.set(timeZoneID, forKey: Self.key) }
+    }
+
+    static var timeZone: TimeZone {
+        shared.timeZoneID.flatMap(TimeZone.init(identifier:)) ?? .autoupdatingCurrent
+    }
+
+    static var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return calendar
+    }
+
+    private init() {
+        timeZoneID = UserDefaults.standard.string(forKey: Self.key)
+    }
+
+    /// 以前时区是每个时段各设各的：第一次运行新版本时，把已有时段用的时区搬成全局的，生效时间保持不变
+    func migrate(from rules: [BlockRule]) {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.migratedKey) else { return }
+        defaults.set(true, forKey: Self.migratedKey)
+        if timeZoneID == nil, let legacy = rules.compactMap(\.timeZoneID).first {
+            timeZoneID = legacy
+        }
+    }
+}
+
 // MARK: - 严格时段的“钉住”
 
 /// 严格时段开始时存一份快照，结束时刻同时用单调时钟记下来。
@@ -203,8 +241,10 @@ final class ScheduleStore {
 
     private init() {
         let defaults = UserDefaults.standard
-        rules = defaults.data(forKey: Self.rulesKey)
+        let saved = defaults.data(forKey: Self.rulesKey)
             .flatMap { try? JSONDecoder().decode([BlockRule].self, from: $0) } ?? []
+        ScheduleClock.shared.migrate(from: saved)
+        rules = saved
         passCounts = defaults.dictionary(forKey: Self.passCountsKey) as? [String: Int] ?? [:]
         attempts = defaults.dictionary(forKey: Self.attemptsKey) as? [String: Int] ?? [:]
         pins = defaults.data(forKey: Self.pinsKey)
@@ -318,7 +358,7 @@ final class ScheduleStore {
     }
 
     private static func dayKey(_ date: Date) -> String {
-        let parts = Calendar.autoupdatingCurrent.dateComponents([.year, .month, .day], from: date)
+        let parts = ScheduleClock.calendar.dateComponents([.year, .month, .day], from: date)
         return "\(parts.year ?? 0)-\(parts.month ?? 0)-\(parts.day ?? 0)"
     }
 
@@ -418,9 +458,9 @@ enum ScheduleText {
         duration(max(1, Int((end.timeIntervalSince(now) / 60).rounded(.up))))
     }
 
-    /// 本机时区的 24 小时制“时:分”（不跟系统语言走，英文系统下也不会变成 12 小时制）
+    /// App 时区里的 24 小时制“时:分”（不跟系统语言走，英文系统下也不会变成 12 小时制）
     static func time(_ date: Date) -> String {
-        timeFormatter.timeZone = .autoupdatingCurrent
+        timeFormatter.timeZone = ScheduleClock.timeZone
         return timeFormatter.string(from: date)
     }
 
@@ -431,9 +471,9 @@ enum ScheduleText {
         return formatter
     }()
 
-    /// 在本机时区显示的时刻；不是今天的话带上“明天”或星期
+    /// 在 App 时区显示的时刻；不是今天的话带上“明天”或星期
     static func moment(_ date: Date, from now: Date = Date()) -> String {
-        let calendar = Calendar.autoupdatingCurrent
+        let calendar = ScheduleClock.calendar
         let time = time(date)
         if calendar.isDate(date, inSameDayAs: now) { return time }
         if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now), calendar.isDate(date, inSameDayAs: tomorrow) {
@@ -445,7 +485,7 @@ enum ScheduleText {
 
     /// 一段时间：同一天的结束只写时刻
     static func span(_ start: Date, _ end: Date, from now: Date = Date()) -> String {
-        let sameDay = Calendar.autoupdatingCurrent.isDate(start, inSameDayAs: end)
+        let sameDay = ScheduleClock.calendar.isDate(start, inSameDayAs: end)
         return "\(moment(start, from: now))–\(sameDay ? time(end) : moment(end, from: now))"
     }
 
