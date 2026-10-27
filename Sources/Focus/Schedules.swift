@@ -37,6 +37,8 @@ struct BlockRule: Codable, Hashable, Identifiable {
     var apps: [BlockedApp]
     /// 严格：进行中不能跳过，也不能修改、停用或删除这个时段
     var isStrict = false
+    /// 暂停的网站，和 App 分开设置
+    var sites: [BlockedSite] = []
 
     var timeZone: TimeZone {
         timeZoneID.flatMap(TimeZone.init(identifier:)) ?? .autoupdatingCurrent
@@ -50,6 +52,35 @@ struct BlockRule: Codable, Hashable, Identifiable {
 
     func blocks(_ bundleID: String) -> Bool {
         apps.contains { $0.bundleID == bundleID }
+    }
+
+    func blockedSite(for url: URL) -> BlockedSite? {
+        sites.first { $0.matches(url) }
+    }
+
+    /// 既没选 App 也没选网站
+    var hasNoTargets: Bool { apps.isEmpty && sites.isEmpty }
+}
+
+/// 自己写解码：以前存下的时段（包括严格时段的快照）没有 sites 这一项，
+/// 用自动生成的解码会整条读失败、时段直接丢掉
+extension BlockRule {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, tint, isEnabled, timeZoneID, weekdays, windows, apps, isStrict, sites
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        tint = try container.decodeIfPresent(Int.self, forKey: .tint) ?? 0
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        timeZoneID = try container.decodeIfPresent(String.self, forKey: .timeZoneID)
+        weekdays = try container.decode(Set<Int>.self, forKey: .weekdays)
+        windows = try container.decode([TimeWindow].self, forKey: .windows)
+        apps = try container.decodeIfPresent([BlockedApp].self, forKey: .apps) ?? []
+        isStrict = try container.decodeIfPresent(Bool.self, forKey: .isStrict) ?? false
+        sites = try container.decodeIfPresent([BlockedSite].self, forKey: .sites) ?? []
     }
 }
 
@@ -198,6 +229,31 @@ final class ScheduleStore {
         return activeOccurrences(at: now)
             .filter { $0.rule.blocks(bundleID) && ($0.rule.isStrict || !hasPass) }
             .max { a, b in a.rule.isStrict != b.rule.isStrict ? b.rule.isStrict : a.end < b.end }
+    }
+
+    /// 这个网址现在被哪个时段的哪条网站规则挡着。临时放行只对温和时段有效
+    func blockingSite(for url: URL, at now: Date = Date()) -> (occurrence: Occurrence, site: BlockedSite)? {
+        let candidates = activeOccurrences(at: now).compactMap { occurrence -> (occurrence: Occurrence, site: BlockedSite)? in
+            guard let site = occurrence.rule.blockedSite(for: url) else { return nil }
+            if !occurrence.rule.isStrict, (passes[site.passKey] ?? .distantPast) > now { return nil }
+            return (occurrence, site)
+        }
+        return candidates.max { a, b in
+            a.occurrence.rule.isStrict != b.occurrence.rule.isStrict ? b.occurrence.rule.isStrict : a.occurrence.end < b.occurrence.end
+        }
+    }
+
+    /// 这条网站规则现在还在不在生效（拦截界面判断要不要收起）
+    func isBlocking(site: BlockedSite, at now: Date = Date()) -> Bool {
+        activeOccurrences(at: now).contains { occurrence in
+            occurrence.rule.sites.contains(site)
+                && (occurrence.rule.isStrict || (passes[site.passKey] ?? .distantPast) <= now)
+        }
+    }
+
+    /// 正在生效、包含网站的时段（没有就不用去读浏览器）
+    func activeSiteOccurrences(at now: Date = Date()) -> [Occurrence] {
+        activeOccurrences(at: now).filter { !$0.rule.sites.isEmpty }
     }
 
     /// 严格时段一开始就钉住；过期的钉子拔掉
@@ -391,6 +447,16 @@ enum ScheduleText {
     static func span(_ start: Date, _ end: Date, from now: Date = Date()) -> String {
         let sameDay = Calendar.autoupdatingCurrent.isDate(start, inSameDayAs: end)
         return "\(moment(start, from: now))–\(sameDay ? time(end) : moment(end, from: now))"
+    }
+
+    /// 时段暂停的 App 和网站，合在一起说
+    static func targetList(_ rule: BlockRule) -> String {
+        let names = rule.apps.map(\.name) + rule.sites.map(\.displayName)
+        switch names.count {
+        case 0: return "还没有选 App 或网站"
+        case 1...2: return names.joined(separator: "、")
+        default: return "\(names.prefix(2).joined(separator: "、")) 等 \(names.count) 项"
+        }
     }
 
     static func appList(_ apps: [BlockedApp]) -> String {

@@ -1,19 +1,64 @@
 import AppKit
 import SwiftUI
 
-/// 盯着所有 App：被时段限制的 App 一律收起来（严格时段直接退出），
-/// 切到前台时盖上一层拦截界面。
+/// 被拦下的东西：一个 App，或者浏览器里的一个网站
+enum BlockTarget {
+    case app(NSRunningApplication)
+    case site(BlockedSite, browser: NSRunningApplication)
+
+    /// 临时放行、拦截计数用的键
+    var passKey: String {
+        switch self {
+        case .app(let app): app.bundleIdentifier ?? ""
+        case .site(let site, _): site.passKey
+        }
+    }
+
+    /// 判断“是不是同一个”：同一个 App 进程，或者同一个浏览器里的同一个网站
+    var identity: String {
+        switch self {
+        case .app(let app): "app:\(app.processIdentifier)"
+        case .site(let site, let browser): "site:\(site.pattern):\(browser.processIdentifier)"
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .app(let app): app.localizedName ?? "这个 App"
+        case .site(let site, _): site.displayName
+        }
+    }
+
+    var icon: NSImage {
+        switch self {
+        case .app(let app): app.icon ?? AppIcons.icon(for: app.bundleIdentifier ?? "")
+        case .site(let site, _): SiteIcons.shared.icon(for: site)
+        }
+    }
+
+    var isSite: Bool {
+        if case .site = self { return true }
+        return false
+    }
+}
+
+/// 盯着所有 App 和浏览器：被时段限制的 App 一律收起来（严格时段直接退出），
+/// 切到前台、或者浏览器停在被暂停的网站上时，盖上一层拦截界面。
 final class AppBlocker: NSObject {
     private let store = ScheduleStore.shared
+    private let access = BrowserAccess.shared
     private let shield = ShieldController()
     private let countdown = PassCountdownController()
     private var passTimers: [String: [Timer]] = [:]
     private var timer: Timer?
+    private var webTimer: Timer?
     /// 最近一次用的、没被限制的 App，“回到学习”时切回去
     private var lastAllowedApp: NSRunningApplication?
     /// 已经请求退出的 App 和请求时间：太久没退就强制退出
     private var quitting: [pid_t: Date] = [:]
     private static let forceQuitAfter: TimeInterval = 15
+    /// 浏览器在前台时多久读一次网址
+    private static let webInterval: TimeInterval = 0.8
 
     /// 专注画面显示时不弹拦截界面（它已经盖住了整个屏幕）
     var isSuspended: () -> Bool = { false }
@@ -33,17 +78,19 @@ final class AppBlocker: NSObject {
                                                name: .NSSystemTimeZoneDidChange, object: nil)
         timer = Timer.scheduledTimer(timeInterval: 5, target: self, selector: #selector(evaluate),
                                      userInfo: nil, repeats: true)
+        webTimer = Timer.scheduledTimer(timeInterval: Self.webInterval, target: self, selector: #selector(checkBrowser),
+                                        userInfo: nil, repeats: true)
 
         shield.onBack = { [weak self] in self?.backToStudy() }
-        shield.onPass = { [weak self] app, rule in self?.grantPass(to: app, rule: rule) }
-        countdown.onEndEarly = { [weak self] bundleID in self?.endPassEarly(bundleID) }
+        shield.onPass = { [weak self] target, rule in self?.grantPass(to: target, rule: rule) }
+        countdown.onEndEarly = { [weak self] key in self?.endPassEarly(key) }
         evaluate()
     }
 
-    /// 专注画面要出来了：先收起拦截界面，被限制的 App 也收起来
+    /// 专注画面要出来了：先收起拦截界面，被拦的 App 收起来、网站标签页关掉
     func yieldToOverlay() {
-        guard let app = shield.app else { return }
-        putAway(app)
+        guard let target = shield.target else { return }
+        putAway(target)
         shield.dismiss(playSound: false)
     }
 
@@ -56,33 +103,52 @@ final class AppBlocker: NSObject {
         store.pinStrictSessions()
         store.dropExpiredPasses()
         countdown.refresh()
-        // 时段结束了，或者拿到了临时放行：收起拦截界面，App 留在前台
-        if let shown = shield.app, store.blockingOccurrence(for: shown.bundleIdentifier ?? "") == nil {
+        // 时段结束了，或者拿到了临时放行：收起拦截界面，App / 网页留在前台
+        if let shown = shield.target, !isStillBlocked(shown) {
             shield.dismiss(playSound: false)
         }
         sweepBackgroundApps()
+        sweepStrictTabs()
         if let front = NSWorkspace.shared.frontmostApplication { check(front) }
     }
+
+    private func isStillBlocked(_ target: BlockTarget) -> Bool {
+        switch target {
+        case .app(let app): store.blockingOccurrence(for: app.bundleIdentifier ?? "") != nil
+        case .site(let site, _): store.isBlocking(site: site)
+        }
+    }
+
+    // MARK: App
 
     private func check(_ app: NSRunningApplication) {
         guard let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier else { return }
         guard let occurrence = store.blockingOccurrence(for: bundleID) else {
             lastAllowedApp = app
-            // 用 ⌘Tab 切到了一个没被限制的 App：被拦的那个也要收起来，不能留在后面偷看
-            if let blocked = shield.app, shield.isShowing {
-                putAway(blocked)
+            if let shown = shield.target, shield.isShowing {
+                // 拦着网站时又切回同一个浏览器：马上再看一眼网址，还是那个网站就继续拦
+                if case .site(_, let browser) = shown, browser.processIdentifier == app.processIdentifier {
+                    checkBrowser()
+                    return
+                }
+                // 用 ⌘Tab 切到了别的 App：被拦的那个也要收起来，不能留在后面偷看
+                putAway(shown)
                 shield.dismiss(playSound: false)
             }
             return
         }
         if isSuspended() {
-            putAway(app)
+            putAway(.app(app))
             return
         }
-        // 同一个 App 又跳到前台不算新的一次
-        let isNewAttempt = !(shield.isShowing && shield.app?.processIdentifier == app.processIdentifier)
-        let attempt = isNewAttempt ? store.recordAttempt(for: bundleID) : nil
-        shield.show(app: app, occurrence: occurrence, passesLeft: store.passesLeft(for: occurrence.rule), attempt: attempt)
+        present(.app(app), occurrence: occurrence)
+    }
+
+    private func present(_ target: BlockTarget, occurrence: Occurrence) {
+        // 同一个东西又跳到前台不算新的一次
+        let isNewAttempt = !(shield.isShowing && shield.target?.identity == target.identity)
+        let attempt = isNewAttempt ? store.recordAttempt(for: target.passKey) : nil
+        shield.show(target, occurrence: occurrence, passesLeft: store.passesLeft(for: occurrence.rule), attempt: attempt)
     }
 
     /// 后台开着的被限制 App：窗口露在后面也能滚动着看，所以统统收起来
@@ -91,70 +157,125 @@ final class AppBlocker: NSObject {
         quitting = quitting.filter { pid, _ in NSRunningApplication(processIdentifier: pid) != nil }
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard let bundleID = app.bundleIdentifier, bundleID != Bundle.main.bundleIdentifier,
-                  app.processIdentifier != front, app.processIdentifier != shield.app?.processIdentifier,
+                  app.processIdentifier != front, shield.target?.identity != "app:\(app.processIdentifier)",
                   store.blockingOccurrence(for: bundleID) != nil
             else { continue }
-            putAway(app)
+            putAway(.app(app))
         }
     }
 
-    /// 温和时段收起来；严格时段直接退出（后台放歌、弹消息也一并停掉）
-    private func putAway(_ app: NSRunningApplication) {
-        guard let bundleID = app.bundleIdentifier, let occurrence = store.blockingOccurrence(for: bundleID) else {
-            app.hide()
-            return
-        }
-        guard occurrence.rule.isStrict else {
-            if !app.isHidden { app.hide() }
-            return
-        }
-        if let asked = quitting[app.processIdentifier] {
-            if Date().timeIntervalSince(asked) > Self.forceQuitAfter { app.forceTerminate() }
-        } else {
-            quitting[app.processIdentifier] = Date()
-            app.hide()
-            app.terminate()
+    /// 温和：App 收起来、网站关掉标签页；严格：App 直接退出（后台放歌、弹消息也一并停掉）
+    private func putAway(_ target: BlockTarget) {
+        switch target {
+        case .site(_, let browser):
+            Browser.from(bundleID: browser.bundleIdentifier)?.closeFrontTab()
+        case .app(let app):
+            guard let bundleID = app.bundleIdentifier, let occurrence = store.blockingOccurrence(for: bundleID) else {
+                app.hide()
+                return
+            }
+            guard occurrence.rule.isStrict else {
+                if !app.isHidden { app.hide() }
+                return
+            }
+            if let asked = quitting[app.processIdentifier] {
+                if Date().timeIntervalSince(asked) > Self.forceQuitAfter { app.forceTerminate() }
+            } else {
+                quitting[app.processIdentifier] = Date()
+                app.hide()
+                app.terminate()
+            }
         }
     }
+
+    // MARK: 网站
+
+    /// 浏览器在前台、又有包含网站的时段在生效时，读一下当前标签页的网址
+    @objc private func checkBrowser() {
+        guard !isSuspended(), !store.activeSiteOccurrences().isEmpty,
+              let front = NSWorkspace.shared.frontmostApplication,
+              let browser = Browser.from(bundleID: front.bundleIdentifier),
+              access.isGranted(browser),
+              let url = browser.frontURL()
+        else { return }
+        guard let (occurrence, site) = store.blockingSite(for: url) else { return }
+        present(.site(site, browser: front), occurrence: occurrence)
+    }
+
+    /// 严格时段：所有浏览器里匹配的标签页都关掉，后台放着的视频也不行。
+    /// 拦截界面正盖着的那个标签页先留着，等“回到学习”时再关
+    private func sweepStrictTabs() {
+        let strictSites = store.activeSiteOccurrences().filter(\.rule.isStrict).flatMap(\.rule.sites)
+        guard !strictSites.isEmpty else { return }
+        let shownBrowser: pid_t? = {
+            if case .site(_, let browser) = shield.target { return browser.processIdentifier }
+            return nil
+        }()
+        for browser in Browser.allCases where browser.isRunning && access.isGranted(browser) {
+            let pid = NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID).first?.processIdentifier
+            browser.closeTabs(where: { url in strictSites.contains { $0.matches(url) } },
+                              keepFront: pid != nil && pid == shownBrowser)
+        }
+    }
+
+    // MARK: 回到学习、临时放行
 
     private func backToStudy() {
-        if let app = shield.app { putAway(app) }
+        guard let target = shield.target else { return }
+        putAway(target)
         shield.dismiss(playSound: true)
-        if let lastAllowedApp, !lastAllowedApp.isTerminated { lastAllowedApp.activate() }
+        switch target {
+        case .app:
+            if let lastAllowedApp, !lastAllowedApp.isTerminated { lastAllowedApp.activate() }
+        case .site(_, let browser):
+            // 标签页关掉了，留在浏览器里继续（多半是在查资料）
+            browser.activate()
+        }
     }
 
-    private func grantPass(to app: NSRunningApplication, rule: BlockRule) {
-        guard let bundleID = app.bundleIdentifier else { return }
-        store.grantPass(for: bundleID, rule: rule)
+    private func grantPass(to target: BlockTarget, rule: BlockRule) {
+        store.grantPass(for: target.passKey, rule: rule)
         shield.dismiss(playSound: false)
-        app.activate()
+        switch target {
+        case .app(let app): app.activate()
+        case .site(_, let browser): browser.activate()
+        }
         countdown.refresh()
-        schedulePassTimers(for: bundleID)
+        schedulePassTimers(for: target.passKey)
     }
 
     /// 剩 1 分钟轻轻提醒一声；到点准时重新检查（不用等下一次 5 秒轮询）
-    private func schedulePassTimers(for bundleID: String) {
-        passTimers[bundleID]?.forEach { $0.invalidate() }
-        guard let end = store.passes[bundleID] else { return }
+    private func schedulePassTimers(for key: String) {
+        passTimers[key]?.forEach { $0.invalidate() }
+        guard let end = store.passes[key] else { return }
         let chime = Timer(fire: end.addingTimeInterval(-60), interval: 0, repeats: false) { _ in
             SoundPlayer.shared.playNote(2)
         }
         let expiry = Timer(fire: end.addingTimeInterval(0.2), interval: 0, repeats: false) { [weak self] _ in
-            self?.passTimers[bundleID] = nil
+            self?.passTimers[key] = nil
             self?.evaluate()
+            self?.checkBrowser()
         }
         [chime, expiry].forEach { RunLoop.main.add($0, forMode: .common) }
-        passTimers[bundleID] = [chime, expiry]
+        passTimers[key] = [chime, expiry]
     }
 
-    /// 倒计时胶囊上点了“现在结束”：收回放行，App 收起来
-    private func endPassEarly(_ bundleID: String) {
-        passTimers[bundleID]?.forEach { $0.invalidate() }
-        passTimers[bundleID] = nil
-        store.revokePass(for: bundleID)
+    /// 倒计时胶囊上点了“现在结束”：收回放行，App 收起来 / 网站标签页关掉
+    private func endPassEarly(_ key: String) {
+        passTimers[key]?.forEach { $0.invalidate() }
+        passTimers[key] = nil
+        store.revokePass(for: key)
         // 后台 App 收不了别人的前台窗口，先借这次点击让 Focus 自己成为活跃 App
         NSApp.activate(ignoringOtherApps: true)
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) { app.hide() }
+        if key.hasPrefix(BlockedSite.passPrefix) {
+            let pattern = String(key.dropFirst(BlockedSite.passPrefix.count))
+            let site = BlockedSite(pattern: pattern, name: nil)
+            for browser in Browser.allCases where browser.isRunning && access.isGranted(browser) {
+                if let url = browser.frontURL(), site.matches(url) { browser.closeFrontTab() }
+            }
+        } else {
+            for app in NSRunningApplication.runningApplications(withBundleIdentifier: key) { app.hide() }
+        }
         SoundPlayer.shared.playNote(5)
         if let lastAllowedApp, !lastAllowedApp.isTerminated { lastAllowedApp.activate() }
         countdown.refresh()
@@ -165,40 +286,41 @@ final class AppBlocker: NSObject {
 final class ShieldController {
     static let holdSeconds: TimeInterval = 3
 
-    private(set) var app: NSRunningApplication?
+    private(set) var target: BlockTarget?
     private var model = ShieldModel()
     private var windows: [(window: OverlayWindow, blur: BackdropBlurView)] = []
     private var isDismissing = false
 
     var onBack: () -> Void = {}
-    var onPass: (NSRunningApplication, BlockRule) -> Void = { _, _ in }
+    var onPass: (BlockTarget, BlockRule) -> Void = { _, _ in }
 
-    var isShowing: Bool { app != nil && !isDismissing }
+    var isShowing: Bool { target != nil && !isDismissing }
 
-    func show(app: NSRunningApplication, occurrence: Occurrence, passesLeft: Int, attempt: Int?) {
-        if isShowing, self.app?.processIdentifier == app.processIdentifier {
-            // 同一个 App 又跳到前台（比如点了它的通知）：内容更新一下，焦点拿回来
+    func show(_ target: BlockTarget, occurrence: Occurrence, passesLeft: Int, attempt: Int?) {
+        if isShowing, self.target?.identity == target.identity {
+            // 同一个东西又跳到前台（比如点了它的通知）：内容更新一下，焦点拿回来
             model.occurrence = occurrence
             model.passesLeft = passesLeft
             NSApp.activate(ignoringOtherApps: true)
             windows.first?.window.makeKeyAndOrderFront(nil)
             return
         }
-        if self.app != nil { tearDown() }
+        if self.target != nil { tearDown() }
 
-        self.app = app
+        self.target = target
         model = ShieldModel()
-        model.appName = app.localizedName ?? "这个 App"
-        model.appIcon = app.icon ?? AppIcons.icon(for: app.bundleIdentifier ?? "")
+        model.appName = target.name
+        model.appIcon = target.icon
+        model.isSite = target.isSite
         model.occurrence = occurrence
         model.passesLeft = passesLeft
         model.attempt = attempt ?? 1
         model.onBack = { [weak self] in self?.onBack() }
         model.onHoldChanged = { [weak self] holding in self?.setHolding(holding) }
         model.onHoldCompleted = { [weak self] in
-            guard let self, let app = self.app, let rule = self.model.occurrence?.rule else { return }
+            guard let self, let target = self.target, let rule = self.model.occurrence?.rule else { return }
             SoundPlayer.shared.playNote(4)
-            self.onPass(app, rule)
+            self.onPass(target, rule)
         }
 
         buildWindows()
@@ -210,7 +332,7 @@ final class ShieldController {
     }
 
     func dismiss(playSound: Bool) {
-        guard app != nil, !isDismissing else { return }
+        guard target != nil, !isDismissing else { return }
         isDismissing = true
         if playSound { SoundPlayer.shared.playNote(5) }
         SoundPlayer.shared.stop(.hold, fade: 0.2)
@@ -239,7 +361,7 @@ final class ShieldController {
     private func tearDown() {
         windows.forEach { $0.window.orderOut(nil) }
         windows.removeAll()
-        app = nil
+        target = nil
         isDismissing = false
     }
 

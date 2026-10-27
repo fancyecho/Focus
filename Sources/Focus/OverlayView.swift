@@ -466,7 +466,7 @@ extension View {
     }
 }
 
-private struct Shake: GeometryEffect {
+struct Shake: GeometryEffect {
     var attempts: CGFloat
     var animatableData: CGFloat {
         get { attempts }

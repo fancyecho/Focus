@@ -294,7 +294,7 @@ private struct ScheduleStatusRow: View {
                         }
                         Text(blocked > 0
                              ? "\(ScheduleText.moment(active.end, from: now)) 结束 · 拦下 \(blocked) 次"
-                             : "\(ScheduleText.moment(active.end, from: now)) 结束 · \(ScheduleText.appList(rule.apps))暂停")
+                             : "\(ScheduleText.moment(active.end, from: now)) 结束 · \(ScheduleText.targetList(rule))暂停")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -316,14 +316,14 @@ private struct ScheduleStatusRow: View {
         } else if let next = store.nextOccurrence(after: now) {
             row(icon: icon(for: next.rule),
                 title: "下一段 · \(next.rule.name)",
-                subtitle: "\(ScheduleText.moment(next.start, from: now)) 开始 · \(ScheduleText.appList(next.rule.apps))")
+                subtitle: "\(ScheduleText.moment(next.start, from: now)) 开始 · \(ScheduleText.targetList(next.rule))")
         } else {
             row(icon: Image(systemName: "calendar.badge.clock")
                     .font(.system(size: 15))
                     .foregroundStyle(Brand.gradient)
                     .frame(width: 28, height: 28),
                 title: "时段",
-                subtitle: "在固定的时间，让分心的 App 暂停")
+                subtitle: "在固定的时间，让分心的 App 和网站暂停")
         }
     }
 
@@ -343,10 +343,10 @@ private struct ScheduleStatusRow: View {
 
     @ViewBuilder
     private func icon(for rule: BlockRule) -> some View {
-        if rule.apps.isEmpty {
+        if rule.hasNoTargets {
             Circle().fill(RuleTint.gradient(rule.tint)).frame(width: 10, height: 10).frame(width: 28, height: 28)
         } else {
-            AppStack(apps: rule.apps, size: 22, limit: 2).frame(minWidth: 28)
+            TargetStack(rule: rule, size: 22, limit: 2).frame(minWidth: 28)
         }
     }
 

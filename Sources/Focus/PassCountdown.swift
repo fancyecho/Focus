@@ -102,8 +102,20 @@ private struct PassPill: View {
     private var remaining: Int { max(0, Int(end.timeIntervalSince(now).rounded(.up))) }
     private var urgent: Bool { remaining <= 30 }
 
+    /// 放行的是网站时，键是 "web:域名"
+    private var site: BlockedSite? {
+        guard bundleID.hasPrefix(BlockedSite.passPrefix) else { return nil }
+        let pattern = String(bundleID.dropFirst(BlockedSite.passPrefix.count))
+        return BlockedSite.suggestions.first { $0.pattern == pattern } ?? BlockedSite(pattern: pattern, name: nil)
+    }
+
+    private var icon: NSImage {
+        site.map { SiteIcons.shared.icon(for: $0) } ?? AppIcons.icon(for: bundleID)
+    }
+
     private var appName: String {
-        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first?.localizedName
+        if let site { return site.displayName }
+        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first?.localizedName
             ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
                 .map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") }
             ?? "App"
@@ -123,10 +135,11 @@ private struct PassPill: View {
                             style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .animation(.linear(duration: 1), value: remaining)
-                Image(nsImage: AppIcons.icon(for: bundleID))
+                Image(nsImage: icon)
                     .resizable()
                     .interpolation(.high)
                     .frame(width: 18, height: 18)
+                    .clipShape(RoundedRectangle(cornerRadius: site == nil ? 0 : 4, style: .continuous))
             }
             .frame(width: 30, height: 30)
 

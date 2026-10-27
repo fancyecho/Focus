@@ -125,7 +125,7 @@ private struct ScheduleSidebar: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("时段").font(.system(size: 22, weight: .bold))
-                Text("在固定的时间，让分心的 App 暂停")
+                Text("在固定的时间，让分心的 App 和网站暂停")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -225,8 +225,8 @@ private struct RuleRow: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                if !rule.apps.isEmpty {
-                    AppStack(apps: rule.apps, size: 16)
+                if !rule.hasNoTargets {
+                    TargetStack(rule: rule, size: 16)
                 }
             }
             .opacity(rule.isEnabled ? 1 : 0.5)
@@ -283,6 +283,7 @@ private struct RuleEditor: View {
                         TimeCard(rule: $rule)
                         DaysCard(weekdays: $rule.weekdays, tint: rule.tint)
                         AppsCard(apps: $rule.apps)
+                        SitesCard(sites: $rule.sites, tint: rule.tint)
                         ModeCard(isStrict: $rule.isStrict, tint: rule.tint)
                         ZoneCard(timeZoneID: $rule.timeZoneID)
 
@@ -359,7 +360,7 @@ private struct RuleEditor: View {
 
     private func statusLine(now: Date) -> String {
         if !rule.isEnabled { return "已停用" }
-        if rule.apps.isEmpty { return "还没有选要限制的 App" }
+        if rule.hasNoTargets { return "还没有选要暂停的 App 或网站" }
         if let active = store.activeOccurrences(at: now).first(where: { $0.rule.id == rule.id }) {
             return "进行中 · \(ScheduleText.moment(active.end, from: now)) 结束 · 还有 \(ScheduleText.remaining(until: active.end, from: now))"
         }
@@ -1149,6 +1150,214 @@ private struct AppPicker: View {
     }
 }
 
+// MARK: 网站
+
+/// 暂停的网站：和 App 分开设置。输入网址，或者点常用网站；下面显示各个浏览器有没有授权读网址
+private struct SitesCard: View {
+    @Binding var sites: [BlockedSite]
+    let tint: Int
+    @State private var input = ""
+    @State private var invalid = false
+    let icons = SiteIcons.shared
+    let access = BrowserAccess.shared
+
+    private var unusedSuggestions: [BlockedSite] {
+        BlockedSite.suggestions.filter { suggestion in !sites.contains { $0.pattern == suggestion.pattern } }
+    }
+
+    var body: some View {
+        Card(title: "暂停的网站", icon: "network", trailing: sites.isEmpty ? nil : "\(sites.count) 个") {
+            if !sites.isEmpty {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 172), spacing: 8)], alignment: .leading, spacing: 8) {
+                    ForEach(sites) { site in
+                        SiteChip(site: site, icon: icons.icon(for: site)) {
+                            withAnimation(.smooth) { sites.removeAll { $0.pattern == site.pattern } }
+                        }
+                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    }
+                }
+            }
+
+            HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "link").foregroundStyle(.tertiary)
+                    TextField("输入网址，比如 bilibili.com 或 youtube.com/shorts", text: $input)
+                        .textFieldStyle(.plain)
+                        .onSubmit(addTyped)
+                        .onChange(of: input) { invalid = false }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(invalid ? Color.red.opacity(0.6) : .clear)
+                }
+                .modifier(Shake(attempts: invalid ? 1 : 0))
+                .animation(.default, value: invalid)
+
+                Button("添加", action: addTyped)
+                    .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if invalid {
+                Text("这看起来不像网址，试试 bilibili.com 这样的写法")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red.opacity(0.8))
+            }
+
+            if !unusedSuggestions.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("常用").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], alignment: .leading, spacing: 6) {
+                        ForEach(unusedSuggestions) { suggestion in
+                            Button {
+                                withAnimation(.smooth) { sites.append(suggestion) }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(nsImage: icons.icon(for: suggestion))
+                                        .resizable()
+                                        .frame(width: 14, height: 14)
+                                        .clipShape(RoundedRectangle(cornerRadius: 3.5, style: .continuous))
+                                    Text(suggestion.displayName).font(.system(size: 12)).lineLimit(1)
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "plus").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 6)
+                                .background(Color.primary.opacity(0.045), in: Capsule())
+                                .contentShape(Capsule())
+                            }
+                            .buttonStyle(PressScaleStyle())
+                            .help(suggestion.pattern)
+                        }
+                    }
+                }
+            }
+
+            if !sites.isEmpty {
+                Divider().padding(.vertical, 2)
+                BrowserAccessRow(access: access)
+            }
+        }
+    }
+
+    private func addTyped() {
+        guard let pattern = BlockedSite.normalize(input) else {
+            invalid = true
+            return
+        }
+        if !sites.contains(where: { $0.pattern == pattern }) {
+            let known = BlockedSite.suggestions.first { $0.pattern == pattern }
+            withAnimation(.smooth) { sites.append(known ?? BlockedSite(pattern: pattern, name: nil)) }
+        }
+        input = ""
+    }
+}
+
+private struct SiteChip: View {
+    let site: BlockedSite
+    let icon: NSImage
+    let onRemove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 22, height: 22)
+                .clipShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
+            VStack(alignment: .leading, spacing: 0) {
+                Text(site.displayName).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                if site.name != nil {
+                    Text(site.pattern).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 4)
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .opacity(hovering ? 1 : 0)
+            .accessibilityLabel("移除 \(site.displayName)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(hovering ? 0.08 : 0.045), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .onHover { hovering = $0 }
+        .animation(.smooth(duration: 0.18), value: hovering)
+        .help(site.pattern)
+    }
+}
+
+/// 每个装了的浏览器有没有允许 Focus 读网址。没授权的给一个按钮，点了弹系统授权框
+private struct BrowserAccessRow: View {
+    let access: BrowserAccess
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { _ in
+            let browsers = Browser.allCases.filter(\.isInstalled)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Text("浏览器").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    Text("需要允许 Focus 读取当前标签页的网址；不会记录或上传浏览记录")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+                HStack(spacing: 8) {
+                    ForEach(browsers, id: \.self) { browser in
+                        pill(browser, state: access.states[browser])
+                    }
+                }
+                if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "org.mozilla.firefox") != nil {
+                    Text("Firefox 读不到网址。需要的话，把 Firefox 整个加进「暂停的 App」")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+            }
+            .onAppear { access.refreshAll() }
+        }
+    }
+
+    @ViewBuilder
+    private func pill(_ browser: Browser, state: Browser.Permission?) -> some View {
+        let icon = Image(nsImage: AppIcons.icon(for: browser.bundleID)).resizable().frame(width: 15, height: 15)
+        switch state {
+        case .granted:
+            HStack(spacing: 5) {
+                icon
+                Text(browser.name)
+                Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.green)
+            }
+            .font(.system(size: 11.5))
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .background(Color.primary.opacity(0.045), in: Capsule())
+            .help("\(browser.name) 已允许")
+        case .denied:
+            Button { Browser.openAutomationSettings() } label: {
+                HStack(spacing: 5) { icon; Text("\(browser.name) 已拒绝 · 去设置") }
+            }
+            .controlSize(.small)
+            .help("在「系统设置 › 隐私与安全性 › 自动化」里打开 Focus 对 \(browser.name) 的权限")
+        case .notRunning:
+            Button {
+                NSWorkspace.shared.openApplication(at: NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser.bundleID)!,
+                                                   configuration: NSWorkspace.OpenConfiguration()) { _, _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { access.request(browser) }
+                }
+            } label: {
+                HStack(spacing: 5) { icon; Text("打开 \(browser.name) 并允许") }
+            }
+            .controlSize(.small)
+        default:
+            Button { access.request(browser) } label: {
+                HStack(spacing: 5) { icon; Text("允许 \(browser.name)") }
+            }
+            .controlSize(.small)
+        }
+    }
+}
+
 // MARK: 严格程度
 
 private struct ModeCard: View {
@@ -1320,6 +1529,38 @@ struct StatusPill: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(RuleTint.color(tint).opacity(0.15), in: Capsule())
+    }
+}
+
+/// 时段里的 App 图标和网站图标叠在一起
+struct TargetStack: View {
+    let rule: BlockRule
+    let size: CGFloat
+    var limit = 4
+    let icons = SiteIcons.shared
+
+    var body: some View {
+        let images: [(id: String, image: NSImage, rounded: Bool)] =
+            rule.apps.map { ($0.bundleID, AppIcons.icon(for: $0.bundleID), false) }
+            + rule.sites.map { ($0.pattern, icons.icon(for: $0), true) }
+        HStack(spacing: -size * 0.3) {
+            ForEach(images.prefix(limit), id: \.id) { item in
+                Image(nsImage: item.image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: item.rounded ? size * 0.82 : size, height: item.rounded ? size * 0.82 : size)
+                    .clipShape(RoundedRectangle(cornerRadius: item.rounded ? size * 0.2 : 0, style: .continuous))
+                    .frame(width: size, height: size)
+            }
+            if images.count > limit {
+                Text("+\(images.count - limit)")
+                    .font(.system(size: size * 0.55, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, size * 0.4)
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(ScheduleText.targetList(rule))
     }
 }
 

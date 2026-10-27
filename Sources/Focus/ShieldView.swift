@@ -5,6 +5,8 @@ import SwiftUI
 final class ShieldModel {
     var appeared = false
     var appName = ""
+    /// 拦的是网站（图标不用褪色，严格模式的提示也不一样）
+    var isSite = false
     var appIcon = NSImage()
     var occurrence: Occurrence?
     var quote = Quotes.random()
@@ -56,7 +58,7 @@ struct ShieldView: View {
             .padding(.bottom, 36)
 
             LampRing(icon: model.appIcon, remaining: 1 - occurrence.progress(at: now),
-                     tint: rule.tint, lit: model.appeared)
+                     tint: rule.tint, lit: model.appeared, roundsIcon: model.isSite)
                 .frame(width: 176, height: 176)
                 .reveal(model.appeared, delay: 0.1)
                 .padding(.bottom, 44)
@@ -110,6 +112,7 @@ private struct LampRing: View {
     let remaining: Double
     let tint: Int
     let lit: Bool
+    var roundsIcon = false
 
     var body: some View {
         let shown = lit ? remaining : 0
@@ -143,7 +146,9 @@ private struct LampRing: View {
                 Image(nsImage: icon)
                     .resizable()
                     .interpolation(.high)
-                    .frame(width: size * 0.56, height: size * 0.56)
+                    .frame(width: size * (roundsIcon ? 0.44 : 0.56), height: size * (roundsIcon ? 0.44 : 0.56))
+                    // 网站图标多半是方的，裁成和 App 图标一样的圆角
+                    .clipShape(RoundedRectangle(cornerRadius: roundsIcon ? size * 0.1 : 0, style: .continuous))
                     .saturation(0.12)
                     .opacity(0.88)
                     .scaleEffect(lit ? 1 : 1.12)
@@ -195,7 +200,11 @@ private struct ShieldActions: View {
     }
 
     private var footnote: String {
-        if rule.isStrict { return "严格时段 · 结束前不能跳过，回到学习时会退出 \(model.appName)" }
+        if rule.isStrict {
+            return model.isSite ? "严格时段 · 结束前不能跳过，回到学习时会关掉这个标签页"
+                                : "严格时段 · 结束前不能跳过，回到学习时会退出 \(model.appName)"
+        }
+        if model.isSite { return "按回车回到学习，这个标签页会被关掉" }
         if model.passesLeft == 0 { return "今天的临时使用次数已经用完了" }
         return "按回车回到学习"
     }
