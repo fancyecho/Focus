@@ -100,6 +100,11 @@ private struct PassPill: View {
 
     private static let total = TimeInterval(ScheduleStore.passMinutes * 60)
     private static let urgentColor = Color(red: 1.0, green: 0.42, blue: 0.36)
+    /// 抽屉拉开后的宽度：左边距 10 + 分隔线 1 + 间距 10 +“结束”按钮
+    private static let drawerWidth: CGFloat = {
+        let text = ("结束" as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+        return 10 + 1 + 10 + ceil(text.width) + 20
+    }()
 
     private var remaining: Int { max(0, Int(end.timeIntervalSince(now).rounded(.up))) }
     private var urgent: Bool { remaining <= 30 }
@@ -117,7 +122,9 @@ private struct PassPill: View {
 
     private func hoverChanged(_ hovering: Bool) {
         hoverWork?.cancel()
-        let work = DispatchWorkItem { expanded = hovering }
+        let work = DispatchWorkItem {
+            withAnimation(.smooth(duration: 0.38)) { expanded = hovering }
+        }
         hoverWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + (hovering ? 0.25 : 0.35), execute: work)
     }
@@ -166,18 +173,22 @@ private struct PassPill: View {
             }
             .fixedSize()
 
-            if expanded {
-                HStack(spacing: 10) {
-                    Rectangle()
-                        .fill(.primary.opacity(0.15))
-                        .frame(width: 1, height: 18)
-                    EndButton(action: onEndEarly)
-                }
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .offset(x: 10)).animation(.smooth(duration: 0.35).delay(0.06)),
-                    removal: .opacity.animation(.easeOut(duration: 0.12))))
-                .accessibilityHint("提前结束这次临时使用")
+            // “结束”一直在，只是装在一个宽度从 0 拉开的抽屉里：
+            // 不临时插入视图，胶囊变宽和按钮出现由同一个动画驱动，按钮也不会露到胶囊外面
+            HStack(spacing: 10) {
+                Rectangle()
+                    .fill(.primary.opacity(0.15))
+                    .frame(width: 1, height: 18)
+                EndButton(action: onEndEarly)
             }
+            .padding(.leading, 10)
+            .fixedSize()
+            .frame(width: expanded ? Self.drawerWidth : 0, alignment: .leading)
+            .clipped()
+            .opacity(expanded ? 1 : 0)
+            .allowsHitTesting(expanded)
+            .accessibilityHidden(!expanded)
+            .accessibilityHint("提前结束这次临时使用")
         }
         .padding(.leading, 7)
         .padding(.trailing, expanded ? 8 : 16)
@@ -188,7 +199,6 @@ private struct PassPill: View {
         .animation(.easeInOut(duration: 0.9), value: breathing)
         .contentShape(Capsule())
         .onHover(perform: hoverChanged)
-        .animation(.smooth(duration: 0.4), value: expanded)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(appName) 临时使用，还剩 \(remaining / 60) 分 \(remaining % 60) 秒")
     }
