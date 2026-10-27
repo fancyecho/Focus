@@ -9,6 +9,8 @@ final class ShieldModel {
     var occurrence: Occurrence?
     var quote = Quotes.random()
     var passesLeft = 0
+    /// 今天第几次想打开这个 App
+    var attempt = 1
     var holding = false
     var holdProgress: Double = 0
 
@@ -72,6 +74,15 @@ struct ShieldView: View {
                 .padding(.top, 18)
                 .reveal(model.appeared, delay: 0.65)
 
+            // 不责备，只是让你看见自己：从第二次起才提
+            if model.attempt >= 2 {
+                Text("这是今天第 \(model.attempt) 次想打开它")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .opacity(0.55)
+                    .padding(.top, 8)
+                    .reveal(model.appeared, delay: 0.75)
+            }
+
             Spacer(minLength: 40)
 
             Text(model.quote.text)
@@ -79,7 +90,7 @@ struct ShieldView: View {
                 .italic()
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 640)
-                .opacity(0.42)
+                .opacity(0.55)
                 .reveal(model.appeared, delay: 0.85)
                 .padding(.bottom, 34)
 
@@ -179,7 +190,7 @@ private struct ShieldActions: View {
 
             Text(footnote)
                 .font(.system(size: 12, weight: .medium))
-                .opacity(0.42)
+                .opacity(0.5)
         }
     }
 

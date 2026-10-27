@@ -79,7 +79,10 @@ final class AppBlocker: NSObject {
             putAway(app)
             return
         }
-        shield.show(app: app, occurrence: occurrence, passesLeft: store.passesLeft(for: occurrence.rule))
+        // 同一个 App 又跳到前台不算新的一次
+        let isNewAttempt = !(shield.isShowing && shield.app?.processIdentifier == app.processIdentifier)
+        let attempt = isNewAttempt ? store.recordAttempt(for: bundleID) : nil
+        shield.show(app: app, occurrence: occurrence, passesLeft: store.passesLeft(for: occurrence.rule), attempt: attempt)
     }
 
     /// 后台开着的被限制 App：窗口露在后面也能滚动着看，所以统统收起来
@@ -172,7 +175,7 @@ final class ShieldController {
 
     var isShowing: Bool { app != nil && !isDismissing }
 
-    func show(app: NSRunningApplication, occurrence: Occurrence, passesLeft: Int) {
+    func show(app: NSRunningApplication, occurrence: Occurrence, passesLeft: Int, attempt: Int?) {
         if isShowing, self.app?.processIdentifier == app.processIdentifier {
             // 同一个 App 又跳到前台（比如点了它的通知）：内容更新一下，焦点拿回来
             model.occurrence = occurrence
@@ -181,7 +184,7 @@ final class ShieldController {
             windows.first?.window.makeKeyAndOrderFront(nil)
             return
         }
-        if app != nil { tearDown() }
+        if self.app != nil { tearDown() }
 
         self.app = app
         model = ShieldModel()
@@ -189,6 +192,7 @@ final class ShieldController {
         model.appIcon = app.icon ?? AppIcons.icon(for: app.bundleIdentifier ?? "")
         model.occurrence = occurrence
         model.passesLeft = passesLeft
+        model.attempt = attempt ?? 1
         model.onBack = { [weak self] in self?.onBack() }
         model.onHoldChanged = { [weak self] holding in self?.setHolding(holding) }
         model.onHoldCompleted = { [weak self] in

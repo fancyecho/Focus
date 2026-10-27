@@ -3,23 +3,38 @@ import AppKit
 /// 菜单栏图标：一盏青灯。细长的灯焰（焰尖向右轻挑）+ 实心焰心 + 一弯灯盏。
 /// 画成模板图，菜单栏深浅色会自动适配。
 enum StatusIcon {
-    static let image = make(badge: false)
-    /// 右上角带小圆点：有新版本可以更新
-    static let badgedImage = make(badge: true)
+    /// - badge：右上角带小圆点，有新版本可以更新
+    /// - lit：时段进行中，灯焰点亮成实心（焰心镂空）
+    static func image(badge: Bool, lit: Bool) -> NSImage {
+        images[(badge ? 1 : 0) + (lit ? 2 : 0)]
+    }
 
-    private static func make(badge: Bool) -> NSImage {
+    static let image = image(badge: false, lit: false)
+
+    private static let images = [false, true].flatMap { lit in [false, true].map { badge in make(badge: badge, lit: lit) } }
+
+    private static func make(badge: Bool, lit: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
             ctx.setFillColor(NSColor.black.cgColor)
             ctx.setStrokeColor(NSColor.black.cgColor)
             ctx.setLineJoin(.round)
 
-            ctx.addPath(flame(bottom: 5.0, top: 17.4, half: 3.9))
-            ctx.setLineWidth(1.35)
-            ctx.strokePath()
+            if lit {
+                ctx.addPath(flame(bottom: 5.0, top: 17.4, half: 3.9))
+                ctx.fillPath()
+                ctx.setBlendMode(.clear)
+                ctx.addPath(core(bottom: 6.6, top: 11.6, half: 1.6))
+                ctx.fillPath()
+                ctx.setBlendMode(.normal)
+            } else {
+                ctx.addPath(flame(bottom: 5.0, top: 17.4, half: 3.9))
+                ctx.setLineWidth(1.35)
+                ctx.strokePath()
 
-            ctx.addPath(core(bottom: 6.6, top: 11.6, half: 1.6))
-            ctx.fillPath()
+                ctx.addPath(core(bottom: 6.6, top: 11.6, half: 1.6))
+                ctx.fillPath()
+            }
 
             ctx.addPath(dish())
             ctx.fillPath()
@@ -35,7 +50,7 @@ enum StatusIcon {
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = badge ? "Focus（有新版本）" : "Focus"
+        image.accessibilityDescription = badge ? "Focus（有新版本）" : lit ? "Focus（时段进行中）" : "Focus"
         return image
     }
 

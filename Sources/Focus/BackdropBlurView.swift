@@ -6,7 +6,7 @@ import QuartzCore
 final class BackdropBlurView: NSView {
     private static let blurRadius: CGFloat = 42
     private static let saturation: CGFloat = 1.5
-    private static let tintOpacity: Float = 0.12
+    private static let tintOpacity: Float = 0.3
 
     private var backdrop: CALayer?
     private var fallback: NSVisualEffectView?
@@ -33,7 +33,7 @@ final class BackdropBlurView: NSView {
             fallback = effect
         }
 
-        // 一层很淡的暗色，保证白字在亮壁纸上也看得清
+        // 一层暗色，保证白字在亮壁纸、白色窗口上也看得清
         tint.frame = bounds
         tint.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         tint.backgroundColor = NSColor.black.cgColor

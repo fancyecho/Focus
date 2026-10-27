@@ -6,11 +6,10 @@ struct MenuView: View {
     let updater = Updater.shared
     let onStart: () -> Void
     let onOpenSchedules: () -> Void
+    let onOpenSettings: () -> Void
     let onQuit: () -> Void
 
     var body: some View {
-        @Bindable var store = store
-
         VStack(alignment: .leading, spacing: 0) {
             header
                 .padding(.bottom, 18)
@@ -44,90 +43,25 @@ struct MenuView: View {
             .buttonStyle(BrandButtonStyle())
             .padding(.bottom, 18)
 
-            Divider().padding(.bottom, 12)
+            Divider().padding(.bottom, 10)
 
-            HStack {
-                Text("离开后自动模糊")
-                Spacer()
-                Picker("离开后自动模糊", selection: $store.idleMinutes) {
-                    ForEach(FocusStore.idleOptions, id: \.self) { minutes in
-                        Text(minutes == 0 ? "关闭" : "\(minutes) 分钟").tag(minutes)
-                    }
+            HStack(spacing: 14) {
+                Button(action: onOpenSettings) {
+                    Label("设置", systemImage: "gearshape")
                 }
-                .labelsHidden()
-                .fixedSize()
-            }
-            .padding(.bottom, 8)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
 
-            HStack {
-                Text("专注画面保持亮屏")
-                Spacer()
-                Picker("专注画面保持亮屏", selection: $store.keepAwakeMinutes) {
-                    ForEach(FocusStore.keepAwakeOptions, id: \.self) { minutes in
-                        Text(Self.keepAwakeLabel(minutes)).tag(minutes)
-                    }
-                }
-                .labelsHidden()
-                .fixedSize()
-            }
-            .help("没人碰电脑时最多保持亮屏多久，之后按系统设置熄屏、睡眠")
-            .padding(.bottom, 8)
-
-            HStack {
-                Text("音效")
-                Spacer()
-                Toggle("音效", isOn: $store.soundEnabled)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-            }
-            .padding(.bottom, 8)
-
-            HStack {
-                Text("登录时启动")
-                Spacer()
-                Toggle("登录时启动", isOn: store.keepAlive ? .constant(true) : $store.launchAtLogin)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .disabled(store.keepAlive)
-            }
-            .help(store.keepAlive ? "已开启「防止被强行退出」，它会在登录时自动启动" : "")
-            .padding(.bottom, 8)
-
-            TimelineView(.periodic(from: .now, by: 30)) { _ in
-                let locked = ScheduleStore.shared.hasStrictRuleActive && store.keepAlive
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("防止被强行退出")
-                        Spacer()
-                        Toggle("防止被强行退出", isOn: $store.keepAlive)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                            .disabled(locked)
-                    }
-                    if store.keepAliveNeedsApproval {
-                        Button("需要在「系统设置 › 登录项」里允许 Focus") { BackgroundAgent.openLoginItemsSettings() }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11))
-                            .foregroundStyle(Brand.glow)
-                    }
-                }
-                .help(locked ? "严格时段进行中，不能关闭" : "被活动监视器、强制退出结束后，几秒内自动重新打开")
-            }
-            .padding(.bottom, 12)
-
-            Divider().padding(.bottom, 8)
-
-            HStack {
                 // 严格时段进行中不能退出，免得一退出就绕过去了
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
                     let locked = ScheduleStore.shared.hasStrictRuleActive
-                    Button(locked ? "严格时段中，暂不能退出" : "退出 Focus", action: onQuit)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .disabled(locked)
+                    Button(action: onQuit) {
+                        Label(locked ? "严格时段中" : "退出", systemImage: locked ? "lock" : "power")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .disabled(locked)
+                    .help(locked ? "严格时段进行中，暂时不能退出" : "退出 Focus")
                 }
                 Spacer()
                 Button(action: { updater.check(userInitiated: true) }) {
@@ -173,15 +107,6 @@ struct MenuView: View {
         case .checking: return "\(version) · 检查中…"
         case .upToDate: return "\(version) · 已是最新"
         default: return "\(version) · 检查更新"
-        }
-    }
-
-    private static func keepAwakeLabel(_ minutes: Int) -> String {
-        switch minutes {
-        case 0: "跟随系统"
-        case let m where m % 60 == 0: "\(m / 60) 小时"
-        case let m where m > 60: "\(Double(m) / 60) 小时"
-        default: "\(minutes) 分钟"
         }
     }
 
@@ -358,6 +283,7 @@ private struct ScheduleStatusRow: View {
     private func content(now: Date) -> some View {
         if let active = store.activeOccurrences(at: now).last {
             let rule = active.rule
+        let blocked = store.blockedCount(on: now)
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
                     icon(for: rule)
@@ -366,7 +292,9 @@ private struct ScheduleStatusRow: View {
                             Text(rule.name).font(.system(size: 13, weight: .semibold))
                             StatusPill(text: "进行中", tint: rule.tint)
                         }
-                        Text("\(ScheduleText.moment(active.end, from: now)) 结束 · \(ScheduleText.appList(rule.apps))暂停")
+                        Text(blocked > 0
+                             ? "\(ScheduleText.moment(active.end, from: now)) 结束 · 拦下 \(blocked) 次"
+                             : "\(ScheduleText.moment(active.end, from: now)) 结束 · \(ScheduleText.appList(rule.apps))暂停")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

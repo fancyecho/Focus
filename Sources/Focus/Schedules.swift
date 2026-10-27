@@ -155,6 +155,7 @@ final class ScheduleStore {
     private static let rulesKey = "blockRules"
     private static let passCountsKey = "blockPassCounts"
     private static let pinsKey = "strictPins"
+    private static let attemptsKey = "blockAttempts"
 
     var rules: [BlockRule] {
         didSet { save() }
@@ -166,12 +167,15 @@ final class ScheduleStore {
     private var passCounts: [String: Int]
     /// 时段 id → 进行中的严格时段快照
     private(set) var pins: [UUID: StrictPin]
+    /// "bundle id|日期" → 那天被拦下几次
+    private var attempts: [String: Int]
 
     private init() {
         let defaults = UserDefaults.standard
         rules = defaults.data(forKey: Self.rulesKey)
             .flatMap { try? JSONDecoder().decode([BlockRule].self, from: $0) } ?? []
         passCounts = defaults.dictionary(forKey: Self.passCountsKey) as? [String: Int] ?? [:]
+        attempts = defaults.dictionary(forKey: Self.attemptsKey) as? [String: Int] ?? [:]
         pins = defaults.data(forKey: Self.pinsKey)
             .flatMap { try? JSONDecoder().decode([UUID: StrictPin].self, from: $0) } ?? [:]
     }
@@ -238,6 +242,28 @@ final class ScheduleStore {
         let recent = Set((0..<3).map { passKey(rule, now.addingTimeInterval(-Double($0) * 86400)) })
         passCounts = passCounts.filter { key, _ in !key.hasPrefix(rule.id.uuidString) || recent.contains(key) }
         UserDefaults.standard.set(passCounts, forKey: Self.passCountsKey)
+    }
+
+    /// 又被拦下一次，返回今天这是第几次（只留最近一周）
+    @discardableResult
+    func recordAttempt(for bundleID: String, at now: Date = Date()) -> Int {
+        let key = "\(bundleID)|\(Self.dayKey(now))"
+        attempts[key, default: 0] += 1
+        let recent = Set((0..<7).map { Self.dayKey(now.addingTimeInterval(-Double($0) * 86400)) })
+        attempts = attempts.filter { key, _ in recent.contains(String(key.split(separator: "|").last ?? "")) }
+        UserDefaults.standard.set(attempts, forKey: Self.attemptsKey)
+        return attempts[key] ?? 1
+    }
+
+    /// 今天一共拦下几次
+    func blockedCount(on date: Date = Date()) -> Int {
+        let day = Self.dayKey(date)
+        return attempts.reduce(0) { $0 + ($1.key.hasSuffix("|\(day)") ? $1.value : 0) }
+    }
+
+    private static func dayKey(_ date: Date) -> String {
+        let parts = Calendar.autoupdatingCurrent.dateComponents([.year, .month, .day], from: date)
+        return "\(parts.year ?? 0)-\(parts.month ?? 0)-\(parts.day ?? 0)"
     }
 
     /// 提前结束临时放行

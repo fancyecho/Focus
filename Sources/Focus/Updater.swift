@@ -205,9 +205,10 @@ enum Installer {
     }
 
     /// 等当前进程退出后再打开新版
+    /// 用 open -n：万一还有别的旧实例在跑，普通 open 只会把它切到前台，不会启动新版
     static func relaunch(_ appURL: URL) {
         let pid = ProcessInfo.processInfo.processIdentifier
-        let script = "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"\(appURL.path)\""
+        let script = "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; /usr/bin/open -n \"\(appURL.path)\""
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", script]

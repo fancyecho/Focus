@@ -2,11 +2,20 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 时段管理窗口：左边半透明侧栏列出所有时段，右边编辑选中的那个。
+/// 窗口里当前选中的是哪个时段，还是设置页（菜单卡片上点“设置”时直接跳过去）
+@Observable
+final class SchedulesRouter {
+    static let shared = SchedulesRouter()
+    static let settings = UUID(uuidString: "00000000-0000-0000-0000-00000000F0C5")!
+    var selection: UUID?
+}
+
+/// 主窗口：左边半透明侧栏列出所有时段和设置，右边是编辑区。
 final class SchedulesWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
 
-    func show() {
+    func show(settings: Bool = false) {
+        if settings { SchedulesRouter.shared.selection = SchedulesRouter.settings }
         NSApp.activate(ignoringOtherApps: true)
         if let window {
             window.makeKeyAndOrderFront(nil)
@@ -56,15 +65,23 @@ final class SchedulesWindowController: NSObject, NSWindowDelegate {
 
 struct SchedulesView: View {
     @Bindable var store: ScheduleStore
-    @State private var selection: UUID?
+    @Bindable var router = SchedulesRouter.shared
+
+    private var selection: UUID? {
+        get { router.selection }
+        nonmutating set { router.selection = newValue }
+    }
 
     var body: some View {
         HStack(spacing: 0) {
-            ScheduleSidebar(store: store, selection: $selection)
+            ScheduleSidebar(store: store, selection: $router.selection)
                 .frame(width: 270)
 
             Group {
-                if let id = selection, store.rules.contains(where: { $0.id == id }) {
+                if selection == SchedulesRouter.settings {
+                    SettingsPane()
+                        .transition(.opacity)
+                } else if let id = selection, store.rules.contains(where: { $0.id == id }) {
                     RuleEditor(rule: binding(for: id), store: store) {
                         withAnimation(.smooth) {
                             store.rules.removeAll { $0.id == id }
@@ -74,7 +91,7 @@ struct SchedulesView: View {
                     .id(id)
                     .transition(.opacity)
                 } else {
-                    EmptySchedules(store: store, selection: $selection)
+                    EmptySchedules(store: store, selection: $router.selection)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -131,17 +148,34 @@ private struct ScheduleSidebar: View {
             }
             .scrollIndicators(.never)
 
-            Button(action: addRule) {
-                Label("新建时段", systemImage: "plus")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .contentShape(RoundedRectangle(cornerRadius: 10))
+            HStack(spacing: 8) {
+                Button(action: addRule) {
+                    Label("新建时段", systemImage: "plus")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(PressScaleStyle())
+                .keyboardShortcut("n", modifiers: .command)
+                .help("新建时段（⌘N）")
+
+                let onSettings = selection == SchedulesRouter.settings
+                Button { selection = SchedulesRouter.settings } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(onSettings ? AnyShapeStyle(Brand.glow) : AnyShapeStyle(.primary))
+                        .frame(width: 36, height: 34)
+                        .background(onSettings ? Brand.glow.opacity(0.16) : Color.primary.opacity(0.06),
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(PressScaleStyle())
+                .keyboardShortcut(",", modifiers: .command)
+                .help("设置（⌘,）")
+                .accessibilityLabel("设置")
             }
-            .buttonStyle(PressScaleStyle())
-            .keyboardShortcut("n", modifiers: .command)
-            .help("新建时段（⌘N）")
             .padding(16)
         }
     }
@@ -1312,5 +1346,144 @@ struct AppStack: View {
         }
         .accessibilityElement()
         .accessibilityLabel(ScheduleText.appList(apps))
+    }
+}
+
+// MARK: - 设置
+
+/// 设置页：从菜单卡片里搬过来的开关，分组、每项带一句说明
+private struct SettingsPane: View {
+    @Bindable var focus = FocusStore.shared
+    let updater = Updater.shared
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            let strictActive = ScheduleStore.shared.hasStrictRuleActive
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("设置")
+                        .font(.system(size: 28, weight: .bold))
+                        .padding(.bottom, 4)
+
+                    Card(title: "专注画面", icon: "moon.stars") {
+                        row("离开后自动模糊", "多久不碰电脑，屏幕就模糊下来，离开的这段也算进专注") {
+                            Picker("离开后自动模糊", selection: $focus.idleMinutes) {
+                                ForEach(FocusStore.idleOptions, id: \.self) { minutes in
+                                    Text(minutes == 0 ? "关闭" : "\(minutes) 分钟").tag(minutes)
+                                }
+                            }
+                            .labelsHidden()
+                            .fixedSize()
+                        }
+                        Divider()
+                        row("保持亮屏", "专注画面显示时，没人碰电脑最多亮多久，之后按系统设置熄屏") {
+                            Picker("保持亮屏", selection: $focus.keepAwakeMinutes) {
+                                ForEach(FocusStore.keepAwakeOptions, id: \.self) { minutes in
+                                    Text(Self.keepAwakeLabel(minutes)).tag(minutes)
+                                }
+                            }
+                            .labelsHidden()
+                            .fixedSize()
+                        }
+                        Divider()
+                        row("音效", "开启专注、打字解锁、回到学习时的轻声提示；离开电脑自动触发时始终静音") {
+                            Toggle("音效", isOn: $focus.soundEnabled).labelsHidden().toggleStyle(.switch)
+                        }
+                    }
+
+                    Card(title: "启动与守护", icon: "shield.lefthalf.filled") {
+                        row("登录时启动", focus.keepAlive ? "已包含在「防止被强行退出」里" : "开机后自动在菜单栏待命，时段才能按时生效") {
+                            Toggle("登录时启动", isOn: focus.keepAlive ? .constant(true) : $focus.launchAtLogin)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .disabled(focus.keepAlive)
+                        }
+                        Divider()
+                        row("防止被强行退出", strictActive && focus.keepAlive
+                                ? "严格时段进行中，暂时不能关闭"
+                                : "被活动监视器、强制退出结束后，几秒内自动重新打开。严格时段建议打开") {
+                            Toggle("防止被强行退出", isOn: $focus.keepAlive)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .disabled(strictActive && focus.keepAlive)
+                        }
+                        if focus.keepAliveNeedsApproval {
+                            HStack(spacing: 10) {
+                                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                                Text("还需要在「系统设置 › 通用 › 登录项」里允许 Focus 在后台运行")
+                                    .font(.system(size: 11.5))
+                                Spacer(minLength: 8)
+                                Button("去设置") { BackgroundAgent.openLoginItemsSettings() }
+                                    .controlSize(.small)
+                            }
+                            .padding(12)
+                            .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+
+                    Card(title: "关于", icon: "info.circle") {
+                        HStack(spacing: 14) {
+                            Image(nsImage: NSApp.applicationIconImage)
+                                .resizable()
+                                .frame(width: 44, height: 44)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Focus \(updater.currentVersion)").font(.system(size: 14, weight: .semibold))
+                                Text(updateLine).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                                    .contentTransition(.interpolate)
+                            }
+                            Spacer()
+                            Button("检查更新") { updater.check(userInitiated: true) }
+                                .disabled(updater.state == .checking)
+                            Link(destination: URL(string: "https://github.com/fancyecho/Focus")!) {
+                                Image(systemName: "arrow.up.right.square")
+                            }
+                            .help("在 GitHub 上查看")
+                        }
+                        .animation(.smooth, value: updater.state)
+                    }
+                }
+                .padding(.horizontal, 36)
+                .padding(.top, 46)
+                .padding(.bottom, 36)
+                .frame(maxWidth: 660, alignment: .leading)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .onAppear { focus.refreshBackgroundStatus() }
+    }
+
+    private var updateLine: String {
+        switch updater.state {
+        case .checking: "正在检查…"
+        case .upToDate: "已经是最新版本"
+        case .available(let version): "新版本 \(version) 可用，点菜单栏卡片顶部的「更新」安装"
+        case .downloading, .installing: "正在更新…"
+        case .failed(let message): message
+        case .idle: "每 6 小时自动检查一次更新"
+        }
+    }
+
+    private func row<Control: View>(_ title: String, _ detail: String, @ViewBuilder control: () -> Control) -> some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .medium))
+                Text(detail)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .contentTransition(.interpolate)
+            }
+            Spacer(minLength: 12)
+            control()
+        }
+    }
+
+    private static func keepAwakeLabel(_ minutes: Int) -> String {
+        switch minutes {
+        case 0: "跟随系统"
+        case let m where m % 60 == 0: "\(m / 60) 小时"
+        case let m where m > 60: "\(Double(m) / 60) 小时"
+        default: "\(minutes) 分钟"
+        }
     }
 }

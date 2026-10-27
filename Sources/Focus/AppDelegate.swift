@@ -17,7 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastWake = Date()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        BackgroundAgent.handOffIfNeeded()
+        BackgroundAgent.settleInstances()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = StatusIcon.image
@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store: store,
             onStart: { [weak self] in self?.startFromMenu() },
             onOpenSchedules: { [weak self] in self?.openSchedules() },
+            onOpenSettings: { [weak self] in self?.openSchedules(settings: true) },
             onQuit: { NSApp.terminate(nil) }))
 
         blocker.isSuspended = { [weak self] in self?.overlay.isShowing ?? false }
@@ -42,7 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let updater = Updater.shared
         updater.onStateChange = { [weak self] in
             guard let self else { return }
-            self.statusItem.button?.image = updater.hasUpdate ? StatusIcon.badgedImage : StatusIcon.image
+            self.updateStatusIcon()
             DispatchQueue.main.async { self.menuPanel.relayout() }
         }
         updater.start()
@@ -52,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if CommandLine.arguments.contains("--show") {
             showOverlay(playSound: true)
+        }
+        if CommandLine.arguments.contains("--settings") {
+            openSchedules(settings: true)
         }
         if CommandLine.arguments.contains("--schedules") {
             openSchedules()
@@ -89,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: 离开检测
 
     @objc private func checkIdle() {
+        updateStatusIcon()
         // 合盖后 Mac 会周期性“半醒”，屏幕不亮，也不会发系统通知；
         // 这时不能检测离开，否则会在黑屏里开始专注，并把合盖前的时间都算进去
         let now = Date()
@@ -125,9 +130,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.showOverlay(playSound: true) }
     }
 
-    private func openSchedules() {
+    private func openSchedules(settings: Bool = false) {
         menuPanel.close()
-        schedulesWindow.show()
+        schedulesWindow.show(settings: settings)
+    }
+
+    /// 有新版本时带小圆点；时段进行中灯焰点亮
+    private func updateStatusIcon() {
+        let image = StatusIcon.image(badge: Updater.shared.hasUpdate,
+                                     lit: !ScheduleStore.shared.activeOccurrences().isEmpty)
+        if statusItem.button?.image !== image { statusItem.button?.image = image }
     }
 
     /// 专注画面会盖住整个屏幕，拦截界面先让开

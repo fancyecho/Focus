@@ -79,15 +79,15 @@ final class FocusStore {
     }
 
     /// 防止被强行退出（launchd 守护，同时包含登录时启动）
-    var keepAlive = BackgroundAgent.isEnabled {
+    var keepAlive = BackgroundAgent.isEnabled || BackgroundAgent.needsApproval {
         didSet {
-            guard keepAlive != oldValue else { return }
-            do {
-                try BackgroundAgent.setEnabled(keepAlive)
-                // 守护本身就会在登录时启动，原来的登录项关掉，免得启动两次
-                if keepAlive, SMAppService.mainApp.status == .enabled { try? SMAppService.mainApp.unregister() }
-            } catch {
-                NSLog("Focus: 无法设置后台守护：\(error.localizedDescription)")
+            guard keepAlive != oldValue, !isRefreshing else { return }
+            if keepAlive {
+                do { try BackgroundAgent.enable() } catch {
+                    NSLog("Focus: 无法设置后台守护：\(error.localizedDescription)")
+                }
+            } else {
+                BackgroundAgent.disable()
             }
             refreshBackgroundStatus()
         }
@@ -96,9 +96,15 @@ final class FocusStore {
     /// 守护已注册，但还要在“系统设置 › 登录项”里允许
     private(set) var keepAliveNeedsApproval = BackgroundAgent.needsApproval
 
+    /// 读系统状态时不要反过来触发注册、注销
+    private var isRefreshing = false
+
     /// 用户可能在系统设置里改过，打开卡片时重新读一下
     func refreshBackgroundStatus() {
-        let enabled = BackgroundAgent.isEnabled
+        isRefreshing = true
+        defer { isRefreshing = false }
+        // 刚注册还在等批准时也算“开着”，开关不要弹回去
+        let enabled = BackgroundAgent.isEnabled || BackgroundAgent.needsApproval
         if keepAlive != enabled { keepAlive = enabled }
         keepAliveNeedsApproval = BackgroundAgent.needsApproval
         launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -106,7 +112,7 @@ final class FocusStore {
 
     var launchAtLogin = SMAppService.mainApp.status == .enabled {
         didSet {
-            guard launchAtLogin != oldValue else { return }
+            guard launchAtLogin != oldValue, !isRefreshing else { return }
             do {
                 if launchAtLogin { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
             } catch {
